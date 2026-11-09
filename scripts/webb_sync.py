@@ -96,12 +96,13 @@ ESO_SITES = {
 }
 SITE = "https://esawebb.org"  # for --debug
 CDN = "https://cdn.esawebb.org/archives/images"
-SKIP_IDS = {"potm", "archive", "search", "page", "viewall", "zoomable"}
+SKIP_IDS = {"potm", "potw", "archive", "search", "page", "viewall", "zoomable"}
 
 # Titles that give away versions with text/graphics on top
 TEXT_HINTS = re.compile(
     r"\b(annotated|compass|labell?ed|scale ?bar|spectrum|spectra|graph|chart|"
-    r"infographic|diagram|comparison|illustration|artist)", re.I)
+    r"infographic|diagram|comparison|illustration|artist|velocity|composition|"
+    r"IFU|map of|light curve)", re.I)
 
 LABELS = [
     "Name", "Type", "Distance", "Constellation", "Category", "Id",
@@ -119,6 +120,7 @@ STOP_RE = "|".join(re.escape(s) for s in sorted(STOPS, key=len, reverse=True))
 # ================================================================ APOD
 
 APOD_API = "https://api.nasa.gov/planetary/apod"
+APOD_SITE = "https://science.nasa.gov/apod/"  # fallback when the API fails
 APOD_MIN_WIDTH = 1000  # very small ones look bad on a TV
 
 # ================================================================ text
@@ -226,7 +228,8 @@ def eso_items(name: str) -> list[tuple[str, callable]]:
 
 # ---------------------------------------------------------------- APOD
 
-def apod_items(api_key: str, days: int) -> list[tuple[str, callable]]:
+def apod_items(api_key: str, days: int) -> list[tuple[str, callable]] | None:
+    """APOD via the official API. Returns None if the API is unavailable."""
     end = dt.date.today()
     start = end - dt.timedelta(days=max(days - 1, 0))
     url = f"{APOD_API}?" + urllib.parse.urlencode(
@@ -234,15 +237,18 @@ def apod_items(api_key: str, days: int) -> list[tuple[str, callable]]:
     try:
         entries = json.loads(get(url))
     except urllib.error.HTTPError as e:
-        if e.code == 400:  # today's APOD isn't out yet (US time zone)
+        if e.code != 400:  # 400 = today's APOD isn't out yet (US time zone)
+            print(f"! APOD API: {e} — falling back to science.nasa.gov", file=sys.stderr)
+            return None
+        try:
             url = url.replace(end.isoformat(), (end - dt.timedelta(days=1)).isoformat())
             entries = json.loads(get(url))
-        else:
-            print(f"! APOD: {e}", file=sys.stderr)
-            return []
+        except Exception as e2:  # noqa: BLE001
+            print(f"! APOD API: {e2} — falling back to science.nasa.gov", file=sys.stderr)
+            return None
     except Exception as e:  # noqa: BLE001
-        print(f"! APOD: {e}", file=sys.stderr)
-        return []
+        print(f"! APOD API: {e} — falling back to science.nasa.gov", file=sys.stderr)
+        return None
 
     out = []
     for e in entries if isinstance(entries, list) else [entries]:
@@ -262,6 +268,97 @@ def apod_items(api_key: str, days: int) -> list[tuple[str, callable]]:
             return meta
         out.append((f"apod:{e['date']}", fetch))
     return out
+
+
+def apod_scrape_items(days: int, known: set[str]) -> list[tuple[str, callable]]:
+    """Fallback: reads science.nasa.gov/apod/ and walks back day by day.
+    Stops at the first date already in the state."""
+    out = []
+    url = APOD_SITE
+    for _ in range(max(days, 1)):
+        try:
+            raw = get(url)
+        except Exception as e:  # noqa: BLE001
+            print(f"! APOD page {url}: {e}", file=sys.stderr)
+            break
+        meta = apod_parse_page(raw, url)
+        if not meta.get("date"):
+            print(f"! APOD page {url}: could not find the date", file=sys.stderr)
+            break
+        key = f"apod:{meta['date']}"
+        if key in known:
+            break
+        out.append((key, lambda m=meta: m))
+        prev = apod_prev_link(raw, meta["date"])
+        if not prev:
+            break
+        url = prev
+        time.sleep(0.5)
+    return out
+
+
+APOD_LINK = re.compile(
+    r'href="(https://science\.nasa\.gov/image-article/apod-(\d{4})-([a-z]+)-(\d{1,2})-[^"]+?)"')
+
+
+def apod_prev_link(raw: str, iso: str) -> str | None:
+    """The link to the closest previous day found on the page."""
+    best = None
+    for m in APOD_LINK.finditer(raw):
+        month = m.group(3).capitalize()
+        if month not in MONTHS_EN:
+            continue
+        d = f"{m.group(2)}-{MONTHS_EN.index(month) + 1:02d}-{int(m.group(4)):02d}"
+        if d < iso and (best is None or d > best[0]):
+            best = (d, m.group(1))
+    return best[1] if best else None
+
+
+def apod_parse_page(raw: str, url: str) -> dict:
+    text = page_text(raw)
+    labels = r"(?:Date|Credit & Copyright|Credit|Image Credit|Explanation|Tomorrow's picture|" \
+             r"Authors & editors|A service of|Yesterday's Image|Tomorrow's Image)"
+
+    def field(label: str) -> str:
+        m = re.search(rf"{label}:\s*(.*?)\s*(?={labels}:|Yesterday's Image|Tomorrow's Image|$)", text)
+        return m.group(1).strip() if m else ""
+
+    meta: dict = {"source": "apod", "rejected": None}
+
+    d = re.search(r"Date:\s*([A-Z][a-z]+) (\d{1,2}), (\d{4})", text)
+    if d and d.group(1) in MONTHS_EN:
+        meta["date"] = f"{d.group(3)}-{MONTHS_EN.index(d.group(1)) + 1:02d}-{int(d.group(2)):02d}"
+    else:
+        m = APOD_LINK.search(f'href="{url}"')
+        if m and m.group(3).capitalize() in MONTHS_EN:
+            meta["date"] = (f"{m.group(2)}-{MONTHS_EN.index(m.group(3).capitalize()) + 1:02d}-"
+                            f"{int(m.group(4)):02d}")
+
+    skip = {"astronomy picture of the day", "apod", "explanation", "related terms",
+            "discover more topics from nasa"}
+    for h in re.findall(r"(?is)<h[12][^>]*>(.*?)</h[12]>", raw):
+        t = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", h))).strip()
+        if t and t.lower() not in skip:
+            meta["title"] = t
+            break
+
+    meta["credit"] = field(r"(?:Credit & Copyright|Image Credit|Credit)")[:120] or "NASA"
+    meta["explanation"] = field("Explanation")[:2500]
+
+    # Only the page body: the <meta>/og:image tags on science.nasa.gov/apod/ are stale
+    body = re.sub(r"(?is)<head\b.*?</head>|<meta\b[^>]*>", " ", raw)
+    imgs = re.findall(
+        r"https://assets\.science\.nasa\.gov/(?:dynamicimage/assets|content/dam)"
+        r"(/science/cds/apod/[^\"'?\s]+?\.(?:jpe?g|png))(?![^\"'\s]*/jcr:content)", body, re.I)
+    imgs = [i for i in imgs if "/renditions/" not in i and "/jcr:content" not in i]
+    if imgs:
+        meta["urls"] = [f"https://assets.science.nasa.gov/content/dam{imgs[0]}"]
+    else:
+        meta["urls"] = []
+        meta["rejected"] = "not an image (probably a video)"
+    if meta.get("date"):
+        meta["file"] = f"apod-{meta['date']}.jpg"
+    return meta
 
 
 # ---------------------------------------------------------------- text
@@ -631,7 +728,10 @@ def main() -> None:
             if name in sources:
                 todo += eso_items(name)
         if "apod" in sources:
-            todo += apod_items(a.apod_key, a.apod_days)
+            got = apod_items(a.apod_key, a.apod_days)
+            if got is None:
+                got = apod_scrape_items(a.apod_days, set(items))
+            todo += got
 
     stats = {"new": 0, "rerender": 0, "skipped": 0, "failed": 0}
 
@@ -649,6 +749,13 @@ def main() -> None:
                 continue
             if it.get("rejected"):
                 print(f"- {key}: {it['rejected']}")
+
+        elif it.get("source") in ESO_SITES:
+            reason = webb_reject(it)  # filters may have changed since it was fetched
+            if reason != it.get("rejected"):
+                it["rejected"] = reason
+                if reason:
+                    print(f"- {key}: {reason}")
 
         if it.get("rejected"):
             stats["skipped"] += 1
