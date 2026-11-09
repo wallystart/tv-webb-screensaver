@@ -31,6 +31,7 @@ Configuration (environment variables or flags, see --help):
   WEBB_CAPTION   1 = with text, 0 = image only          (1)
   WEBB_TRANSLATE none | claude | argos                  (none)
   WEBB_FONT      path to a .ttf                         (DejaVu Sans)
+  WEBB_TEXT_WIDTH share of the width for text, centered  (0.60)
   APOD_API_KEY   api.nasa.gov key                       (DEMO_KEY)
   APOD_DAYS      how many days back to fetch            (14)
   APOD_TEXT      summary | full | none                  (summary)
@@ -66,7 +67,7 @@ except ImportError:
 Image.MAX_IMAGE_PIXELS = None  # some Webb originals are huge
 
 UA = "tv-webb-screensaver (+https://github.com/wallystart/tv-webb-screensaver)"
-RENDER_VERSION = "v4"
+RENDER_VERSION = "v5"
 
 # ================================================================ ESA/Webb
 
@@ -532,8 +533,29 @@ def wrap(draw: ImageDraw.ImageDraw, text: str, font, maxw: int) -> list[str]:
     return lines
 
 
+# Share of the screen width the text may use, centered. The sides stay free
+# because Aerial Views draws its own overlays (clock, etc.) near the edges.
+TEXT_WIDTH = 0.60
+
+
+def draw_centered(d, lines, font, y, W, fill, spacing):
+    for ln in lines:
+        d.text(((W - d.textlength(ln, font=font)) / 2, y), ln, font=font, fill=fill)
+        y += font.size * spacing
+    return y
+
+
+def bottom_shade(canvas, W, H, height, strength=190):
+    grad = Image.new("L", (1, height))
+    for y in range(height):
+        grad.putpixel((0, y), int(strength * (y / height) ** 1.4))
+    shade = Image.new("RGBA", (W, height), (0, 0, 0, 0))
+    shade.putalpha(grad.resize((W, height)))
+    canvas.alpha_composite(shade, (0, H - height))
+
+
 def render_caption(src, W, H, title, line2, font_path):
-    """Webb/Hubble: whole image + short caption at the bottom left."""
+    """Webb/Hubble: whole image + short caption centered at the bottom."""
     src = src.convert("RGB")
     canvas = backdrop(src, W, H, 0.35)
     paste_fit(canvas, src, (0, 0, W, H))
@@ -541,92 +563,79 @@ def render_caption(src, W, H, title, line2, font_path):
         return canvas
 
     canvas = canvas.convert("RGBA")
-    grad_h = int(H * 0.28)
-    grad = Image.new("L", (1, grad_h))
-    for y in range(grad_h):
-        grad.putpixel((0, y), int(190 * (y / grad_h) ** 1.6))
-    shade = Image.new("RGBA", (W, grad_h), (0, 0, 0, 0))
-    shade.putalpha(grad.resize((W, grad_h)))
-    canvas.alpha_composite(shade, (0, H - grad_h))
-
+    bottom_shade(canvas, W, H, int(H * 0.30))
     d = ImageDraw.Draw(canvas)
-    m = int(W * 0.035)
+    maxw = int(W * TEXT_WIDTH)
     f1 = load_font(font_path, int(H * 0.032))
     f2 = load_font(font_path, int(H * 0.021))
-    y2 = H - m - f2.size
-    y1 = y2 - int(f1.size * 1.35)
-    if title:
-        d.text((m, y1), title, font=f1, fill=(255, 255, 255, 235))
-    if line2:
-        d.text((m, y2), line2, font=f2, fill=(220, 220, 220, 200))
+    tl = wrap(d, title, f1, maxw)[:2] if title else []
+    ml = wrap(d, line2, f2, maxw) if line2 else []
+    h = len(tl) * f1.size * 1.25 + (f2.size * 0.5 if tl and ml else 0) + len(ml) * f2.size * 1.35
+    y = H - int(H * 0.05) - h
+    y = draw_centered(d, tl, f1, y, W, (255, 255, 255, 235), 1.25)
+    if tl and ml:
+        y += f2.size * 0.5
+    draw_centered(d, ml, f2, y, W, (220, 220, 220, 205), 1.35)
     return canvas.convert("RGB")
 
 
 def render_panel(src, W, H, title, meta_line, body, font_path):
-    """APOD: whole image on the left, text in a panel on the right.
-    The text never covers the image."""
+    """APOD: whole image on top, text in a centered band below it.
+    The text never covers the image and the sides of the screen stay free."""
     src = src.convert("RGB")
-    canvas = backdrop(src, W, H, 0.30)
-
-    panel_w = int(W * 0.32) if body else int(W * 0.24)
-    gap = int(W * 0.02)
-    paste_fit(canvas, src, (gap, gap, W - panel_w - gap, H - gap))
-
-    canvas = canvas.convert("RGBA")
-    overlay = Image.new("RGBA", (panel_w, H), (0, 0, 0, 110))
-    canvas.alpha_composite(overlay, (W - panel_w, 0))
+    canvas = backdrop(src, W, H, 0.30).convert("RGBA")
     d = ImageDraw.Draw(canvas)
 
-    pad = int(W * 0.022)
-    x, maxw = W - panel_w + pad, panel_w - 2 * pad
-    avail = H - 2 * pad
-
-    # Find the largest font size that fits everything
+    maxw = int(W * TEXT_WIDTH)
+    pad = int(H * 0.035)
+    max_band = int(H * (0.42 if body else 0.18))
     sentences = re.split(r"(?<=[.!?])\s+", body) if body else []
-    hi, lo = int(H * 0.030), int(H * 0.021)
+    hi, lo = int(H * 0.028), int(H * 0.021)
 
     def layout(sz, sents):
-        ft = load_font(font_path, int(sz * 1.45), bold=True)
-        fm = load_font(font_path, int(sz * 0.82))
+        ft = load_font(font_path, int(sz * 1.35), bold=True)
+        fm = load_font(font_path, int(sz * 0.80))
         fb = load_font(font_path, sz)
-        tl = wrap(d, title, ft, maxw) if title else []
+        tl = wrap(d, title, ft, maxw)[:2] if title else []
         ml = wrap(d, meta_line, fm, maxw) if meta_line else []
         bl = wrap(d, " ".join(sents), fb, maxw) if sents else []
-        h = (len(tl) * ft.size * 1.2 + len(ml) * fm.size * 1.35 + fm.size
-             + len(bl) * fb.size * 1.42)
+        h = (len(tl) * ft.size * 1.2 + len(ml) * fm.size * 1.35
+             + (fm.size * 0.9 if bl else 0) + len(bl) * fb.size * 1.40)
         return h, (ft, fm, fb, tl, ml, bl)
 
     chosen = None
-    for sz in range(hi, lo - 1, -1):
+    for sz in range(hi, lo - 1, -1):  # largest font size that fits the band
         h, lay = layout(sz, sentences)
-        if h <= avail:
-            chosen = lay
+        if h + 2 * pad <= max_band:
+            chosen = (h, lay)
             break
     if chosen is None:  # not even at the minimum size: trim by sentences
         sents = list(sentences)
-        while sents:
+        while sents and chosen is None:
             sents.pop()
             h, lay = layout(lo, sents + (["…"] if sents else []))
-            if h <= avail:
-                chosen = lay
-                break
+            if h + 2 * pad <= max_band:
+                chosen = (h, lay)
         if chosen is None:
-            chosen = layout(lo, [])[1]
+            chosen = layout(lo, [])
 
-    ft, fm, fb, tl, ml, bl = chosen
-    total = (len(tl) * ft.size * 1.2 + len(ml) * fm.size * 1.35 + fm.size
-             + len(bl) * fb.size * 1.42)
-    y = pad + max(0, (avail - total) / 2)  # vertically centered in the panel
-    for ln in tl:
-        d.text((x, y), ln, font=ft, fill=(255, 255, 255, 240))
-        y += ft.size * 1.2
-    for ln in ml:
-        d.text((x, y), ln, font=fm, fill=(190, 200, 215, 210))
-        y += fm.size * 1.35
-    y += fm.size
-    for ln in bl:
-        d.text((x, y), ln, font=fb, fill=(232, 232, 232, 230))
-        y += fb.size * 1.42
+    text_h, (ft, fm, fb, tl, ml, bl) = chosen
+    band_h = int(text_h + 2 * pad)
+
+    # Image in the space above the band
+    gap = int(H * 0.03)
+    paste_fit(canvas, src.convert("RGB"), (gap, gap, W - gap, H - band_h))
+
+    bottom_shade(canvas, W, H, band_h + gap, strength=170)
+    y = H - band_h + pad
+    y = draw_centered(d, tl, ft, y, W, (255, 255, 255, 240), 1.2)
+    y = draw_centered(d, ml, fm, y, W, (190, 200, 215, 215), 1.35)
+    if bl:
+        y += fm.size * 0.9
+        x = (W - maxw) / 2  # body: left-aligned inside the centered column
+        for ln in bl:
+            d.text((x, y), ln, font=fb, fill=(232, 232, 232, 232))
+            y += fb.size * 1.40
     return canvas.convert("RGB")
 
 
@@ -702,6 +711,8 @@ def main() -> None:
     ap.add_argument("--translate", default=env("WEBB_TRANSLATE", "none"),
                     choices=["none", "claude", "argos"])
     ap.add_argument("--font", default=env("WEBB_FONT"))
+    ap.add_argument("--text-width", type=float, default=float(env("WEBB_TEXT_WIDTH", "0.60")),
+                    help="share of the screen width used by text, centered (0.3-0.9)")
     ap.add_argument("--apod-key", default=env("APOD_API_KEY", "DEMO_KEY"))
     ap.add_argument("--apod-days", type=int, default=int(env("APOD_DAYS", "14")))
     ap.add_argument("--apod-text", default=env("APOD_TEXT", "summary"),
@@ -722,6 +733,8 @@ def main() -> None:
         return
 
     W, H = (int(x) for x in a.size.lower().split("x"))
+    global TEXT_WIDTH
+    TEXT_WIDTH = min(max(a.text_width, 0.3), 0.9)
     caption = a.caption not in ("0", "false", "no")
     sources = {s.strip() for s in a.sources.split(",") if s.strip()}
     summarize = a.apod_text == "summary" and a.translate == "claude"
@@ -757,7 +770,7 @@ def main() -> None:
                 (d_ / v["file"]).unlink(missing_ok=True)
 
     render_key = hashlib.sha1(
-        f"{W}x{H}|{a.lang}|{caption}|{a.translate}|{a.font}|{a.apod_text}|{RENDER_VERSION}"
+        f"{W}x{H}|{a.lang}|{caption}|{a.translate}|{a.font}|{a.apod_text}|{TEXT_WIDTH}|{RENDER_VERSION}"
         .encode()).hexdigest()[:10]
 
     todo: list[tuple[str, callable | None]] = []
