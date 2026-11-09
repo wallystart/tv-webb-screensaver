@@ -4,7 +4,7 @@ Turn an **Android TV** screensaver into a window to the universe: **NASA's Astro
 
 Instead of the same old photographer shots (Google's *Backdrop*), the TV shows:
 
-- **NASA APOD**: today's picture comes up **often**, with its explanation (optionally translated and summarized) in a side panel that never covers the image.
+- **NASA APOD**: today's picture comes up **often**, with its explanation (optionally translated and summarized) in a band below the image that never covers it.
 - **ESA/Webb** (*Picture of the Month*) and **ESA/Hubble** (*Picture of the Week*), plus nebulae, galaxies and stars: a **random selection that changes every day**.
 
 Also:
@@ -128,6 +128,7 @@ Everything is set through environment variables, a `.env` file at the repo root,
 | `WEBB_CAPTION` | `1` with text / `0` image only | `1` |
 | `WEBB_TRANSLATE` | `none` / `claude` / `argos` | `none` |
 | `WEBB_FONT` | path to a `.ttf` | DejaVu Sans |
+| `WEBB_TEXT_WIDTH` | share of the screen width used by text, centered | `0.60` |
 | `APOD_API_KEY` | free key from [api.nasa.gov](https://api.nasa.gov) | `DEMO_KEY` |
 | `APOD_DAYS` | how many days of APOD to fetch per run | `14` |
 | `APOD_TEXT` | `summary` / `full` / `none` | `summary` |
@@ -136,8 +137,9 @@ Everything is set through environment variables, a `.env` file at the repo root,
 
 #### Text, language and translation
 
-- **Webb and Hubble** get a short caption at the bottom: title, date, constellation, distance and credit.
-- **APOD** gets a **panel on the right** with title, date, credit and the explanation. The whole image goes on the left: the text never covers it. The font size adjusts itself so everything fits.
+- **Webb and Hubble** get a short caption **centered** at the bottom: title, date, constellation, distance and credit.
+- **APOD** shows the whole image on top and a **centered band** below with title, date, credit and the explanation: the text never covers the image. The font size adjusts itself so everything fits.
+- All text stays in the **middle 60%** of the screen (`WEBB_TEXT_WIDTH`), so it doesn't collide with the clock and other overlays Aerial Views draws near the edges.
 - Dates and distances are written in the chosen language with no external dependencies. Titles and explanations come in English from the sources; to translate or condense them:
   - `WEBB_TRANSLATE=claude` + `ANTHROPIC_API_KEY=...` (optional `CLAUDE_MODEL`): translates when `WEBB_LANG=es`, and **condenses the APOD explanation to 2–3 sentences** (in any language), which is what reads comfortably from the couch. Each text is processed only once and cached; it costs cents per month. **Recommended.**
   - `WEBB_TRANSLATE=argos`: offline with [Argos Translate](https://github.com/argosopentech/argos-translate) (`pip install argostranslate` + the en→es package). Translates but doesn't summarize, so the APOD text stays long.
@@ -213,6 +215,7 @@ BACKDROP=<what-you-wrote-down> ./scripts/tv-screensaver.sh restore
 | APOD hardly ever shows up | Turn on shuffle in Aerial Views or raise `POOL_APOD_WEIGHT`. |
 | A source brings nothing | Check the output or `.sync.log`: if a category page moved, adjust it in `ESO_SITES`. |
 | An image with text slipped through | Run `--debug <id>` to see its type and title. If it makes sense, add the word to `TEXT_HINTS` in `webb_sync.py`. |
+| Text overlaps the clock or other Aerial Views overlays | Lower `WEBB_TEXT_WIDTH` (e.g. `0.5`), or move those overlays in the Aerial Views settings. |
 | Black screen in Aerial Views | SMB support is picky about paths: use a simple share, no subfolders, with user and password. |
 
 ---
@@ -222,7 +225,7 @@ BACKDROP=<what-you-wrote-down> ./scripts/tv-screensaver.sh restore
 1. **APOD:** queries `api.nasa.gov/planetary/apod` for the last `APOD_DAYS` days. Skips videos and images narrower than 1000 px.
 2. **Webb and Hubble:** both run on the same ESA platform. It reads *Picture of the Month* / *Picture of the Week* and some categories (set in `ESO_SITES`), and for each new image reads the title, **Type**, date, constellation and distance. Only `Observation` images whose title doesn't suggest text on top (*annotated*, *compass*, *spectrum*, *illustration*…) are kept.
 3. Downloads the original (Webb/Hubble: `wallpaper_uhd` in 4K or `large`; APOD: `hdurl`) to `~/.cache/webb/raw`.
-4. Renders the TV version to `~/.cache/webb/rendered`: whole image without distortion, blurred background, and the caption or text panel.
+4. Renders the TV version to `~/.cache/webb/rendered`: whole image without distortion, blurred background, and the centered caption or text band.
 5. Rebuilds the TV folder with the daily pool. Files are written atomically, so the TV never sees a half-written one.
 
 ---
