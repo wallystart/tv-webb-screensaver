@@ -1,24 +1,23 @@
 # 🔭 tv-webb-screensaver
 
-Convierte el protector de pantalla de una **Android TV** en una ventana al universo: la **Foto astronómica del día de la NASA (APOD)** más imágenes de los telescopios **James Webb** y **Hubble**, que se actualizan solas todos los días.
+Turn an **Android TV** screensaver into a window to the universe: **NASA's Astronomy Picture of the Day (APOD)** plus images from the **James Webb** and **Hubble** space telescopes, refreshed automatically every day.
 
-En lugar de las mismas fotos de fotógrafos de siempre (el *Backdrop* de Google), la tele muestra:
+Instead of the same old photographer shots (Google's *Backdrop*), the TV shows:
 
-- **APOD de la NASA**: la foto de hoy pasa **seguido**, con su explicación traducida y resumida en un panel al costado que nunca tapa la imagen.
-- **ESA/Webb** (*Picture of the Month*) y **ESA/Hubble** (*Picture of the Week*), más nebulosas, galaxias y estrellas: una selección **al azar que cambia cada día**.
+- **NASA APOD**: today's picture comes up **often**, with its explanation (optionally translated and summarized) in a side panel that never covers the image.
+- **ESA/Webb** (*Picture of the Month*) and **ESA/Hubble** (*Picture of the Week*), plus nebulae, galaxies and stars: a **random selection that changes every day**.
 
-Además:
+Also:
 
-
-- **Sin deformar:** cada imagen se encaja en la resolución exacta de la tele y los bordes se rellenan con la misma imagen desenfocada.
-- **Con leyenda:** título, fecha, constelación y distancia, en español o inglés.
-- **Solo fotos reales:** se descartan gráficos, espectros y versiones con brújula o etiquetas.
+- **No distortion:** every image is fit to the TV's exact resolution, and the borders are filled with a blurred copy of the same image.
+- **Captions:** title, date, constellation and distance, in English or Spanish.
+- **Real photos only:** charts, spectra, and versions with compasses or labels are discarded.
 
 ```
-┌──────────────────────┐    cron diario    ┌───────────────────┐
-│ NASA APOD · ESA/Webb │ ───────────────▶  │  Servidor casero  │
+┌──────────────────────┐    daily cron     ┌───────────────────┐
+│ NASA APOD · ESA/Webb │ ───────────────▶  │  Home server      │
 │ ESA/Hubble           │   webb_sync.py    │  /srv/webb (pool) │
-└──────────────────────┘                   │  (share Samba)    │
+└──────────────────────┘                   │  (Samba share)    │
                                            └─────────┬─────────┘
                                                      │ SMB
                                            ┌─────────▼─────────┐
@@ -28,214 +27,217 @@ Además:
                                            └───────────────────┘
 ```
 
-Probado con una **Skyworth con Android TV** y una mini PC con Ubuntu como servidor.
+Tested on a **Skyworth Android TV** with an Ubuntu mini PC as the server.
 
 ---
 
-## Qué necesitás
+## Requirements
 
-- Una **Android TV / Google TV** (Skyworth, Sony, TCL, Chromecast, Nvidia Shield, etc.)
-- Un **servidor Linux** en la misma red que esté prendido siempre (mini PC, Raspberry Pi, NAS…)
-- La app **[Aerial Views](https://github.com/theothernt/AerialViews)** (gratis, open source, en Play Store)
-- `adb` en el servidor (o en cualquier compu de la red)
+- An **Android TV / Google TV** (Skyworth, Sony, TCL, Chromecast, Nvidia Shield, etc.)
+- A **Linux server** on the same network that is always on (mini PC, Raspberry Pi, NAS…)
+- The **[Aerial Views](https://github.com/theothernt/AerialViews)** app (free, open source, on the Play Store)
+- `adb` on the server (or on any computer on the network)
 
-## Estructura
+## Layout
 
 ```
 scripts/
-├── webb_sync.py       # baja APOD/Webb/Hubble, filtra, encaja, agrega textos y arma el pool del día
-├── setup-samba.sh      # crea la carpeta compartida para la tele
-└── tv-screensaver.sh   # conecta por adb y cambia el protector de pantalla
+├── webb_sync.py        # fetches APOD/Webb/Hubble, filters, fits, adds text, builds the daily pool
+├── setup-samba.sh      # creates the shared folder for the TV
+└── tv-screensaver.sh   # connects over adb and switches the screensaver
+.env.example            # copy to .env for your local settings (git-ignored)
 ```
 
 ---
 
-## Instalación
+## Setup
 
-### 1. Encontrar la IP de la tele
+### 1. Find the TV's IP address
 
-Desde el servidor:
+From the server:
 
 ```bash
-ip a                              # para ver el rango de tu red, ej. 192.168.1.0/24
+ip a                              # see your network range, e.g. 192.168.1.0/24
 sudo nmap -sn 192.168.1.0/24
 ```
 
-Buscá el fabricante de la tele en la lista. Ojo: **Skyworth aparece como `Shenzhen Chuangwei-RGB Electronics`** (Chuangwei es su nombre chino).
+Look for the TV maker in the list. Heads-up: **Skyworth shows up as `Shenzhen Chuangwei-RGB Electronics`** (Chuangwei is its Chinese name).
 
-También la ves en la tele en **Configuración → Red e Internet**.
+You can also find it on the TV under **Settings → Network & Internet**.
 
-> 💡 Reservale una **IP fija** a la tele en el router (DHCP reservation). Si cambia de IP, se rompe la conexión por adb.
+> 💡 Give the TV a **fixed IP** in your router (DHCP reservation). If its IP changes, the adb connection breaks.
 
-### 2. Habilitar adb en la tele
+### 2. Enable adb on the TV
 
-1. **Configuración → Preferencias del dispositivo → Información** → apretá 7 veces sobre **Compilación**.
-2. **Preferencias del dispositivo → Opciones para desarrolladores** → activá **Depuración USB** (en muchas teles eso también habilita adb por red en el puerto 5555).
-3. En el servidor:
+1. **Settings → Device Preferences → About** → press **Build** 7 times.
+2. **Device Preferences → Developer options** → turn on **USB debugging** (on many TVs this also enables network adb on port 5555).
+3. On the server:
 
 ```bash
 sudo apt install -y adb
-export TV=192.168.1.65            # tu IP
+export TV=192.168.1.65            # your TV's IP
 ./scripts/tv-screensaver.sh connect
 ```
 
-Aparece un aviso en la tele: tildá **"Permitir siempre desde esta computadora"** y aceptá. `adb devices` tiene que mostrar `device`, no `unauthorized`.
+A prompt appears on the TV: check **"Always allow from this computer"** and accept. `adb devices` must show `device`, not `unauthorized`.
 
-### 3. Crear la carpeta compartida
+### 3. Create the shared folder
 
 ```bash
 ./scripts/setup-samba.sh
 ```
 
-Te pide una contraseña de Samba: es la que vas a cargar en la tele. Por defecto comparte `/srv/webb` como `webb`, con tu usuario.
+It asks for a Samba password: that's the one you'll enter on the TV. By default it shares `/srv/webb` as `webb`, with your user.
 
-### 4. Bajar y preparar las imágenes
+### 4. Fetch and prepare the images
 
 ```bash
 sudo apt install -y python3-pil fonts-dejavu-core
-adb shell wm size                       # resolución real de la tele, ej. 1920x1080
-export WEBB_SIZE=1920x1080              # poné la que devolvió
+adb shell wm size                       # the TV's real resolution, e.g. 1920x1080
+cp .env.example .env                    # and set WEBB_SIZE to what wm size returned
 ./scripts/webb_sync.py
 ```
 
-La primera vez tarda: lee la página de cada imagen y las procesa todas. Después solo trabaja con las nuevas.
+The first run takes a while: it reads every image page and processes them all. After that it only handles new ones.
 
-#### Cómo se arma lo que ve la tele (el *pool* del día)
+#### What the TV shows (the daily *pool*)
 
-La carpeta compartida **no tiene todo**. En cada corrida se rearma con:
+The shared folder does **not** hold everything. On every run it is rebuilt with:
 
-| Qué | Cuántas | Variable |
+| What | How many | Variable |
 |---|---|---|
-| APOD más reciente, **repetida** para que pase seguido | 8 copias | `POOL_APOD_WEIGHT` |
-| APOD de los días anteriores | 6 | `POOL_APOD_RECENT` |
-| Webb + Hubble **al azar** (cambia cada día) | 40 | `POOL_RANDOM` |
+| Latest APOD, **repeated** so it shows up often | 8 copies | `POOL_APOD_WEIGHT` |
+| APODs from previous days | 6 | `POOL_APOD_RECENT` |
+| **Random** Webb + Hubble (changes daily) | 40 | `POOL_RANDOM` |
 
-Con los valores por defecto, más o menos **1 de cada 7 imágenes es la APOD de hoy**. Las copias son *hardlinks*, así que no ocupan espacio extra. La biblioteca completa queda en `~/.cache/webb/rendered`.
+With the defaults, roughly **1 in 7 images is today's APOD**. The copies are *hardlinks*, so they take no extra space. The full library lives in `~/.cache/webb/rendered`.
 
-> En Aerial Views activá el **orden aleatorio (shuffle)**: si no, las copias de la APOD salen todas seguidas.
+> Turn on **shuffle** in Aerial Views: otherwise all APOD copies play back to back.
 
-#### Configuración
+#### Configuration
 
-Todo se ajusta con variables de entorno (o con el flag equivalente, ver `--help`):
+Everything is set through environment variables, a `.env` file at the repo root, or the equivalent flag (see `--help`). Real environment variables win over `.env`.
 
-| Variable | Valores | Default |
+| Variable | Values | Default |
 |---|---|---|
-| `WEBB_SOURCES` | cualquier combinación de `webb,hubble,apod` | las tres |
-| `WEBB_DEST` | carpeta que lee la tele | `/srv/webb` |
-| `WEBB_CACHE` | originales, biblioteca y estado | `~/.cache/webb` |
-| `WEBB_SIZE` | resolución de la tele | `1920x1080` |
-| `WEBB_LANG` | `es` / `en` | `es` |
-| `WEBB_CAPTION` | `1` con textos / `0` imagen sola | `1` |
+| `WEBB_SOURCES` | any combination of `webb,hubble,apod` | all three |
+| `WEBB_DEST` | folder the TV reads | `/srv/webb` |
+| `WEBB_CACHE` | originals, library and state | `~/.cache/webb` |
+| `WEBB_SIZE` | TV resolution | `1920x1080` |
+| `WEBB_LANG` | `en` / `es` | `en` |
+| `WEBB_CAPTION` | `1` with text / `0` image only | `1` |
 | `WEBB_TRANSLATE` | `none` / `claude` / `argos` | `none` |
-| `WEBB_FONT` | ruta a un `.ttf` | DejaVu Sans |
-| `APOD_API_KEY` | key gratis de [api.nasa.gov](https://api.nasa.gov) | `DEMO_KEY` |
-| `APOD_DAYS` | cuántos días de APOD traer en cada corrida | `14` |
+| `WEBB_FONT` | path to a `.ttf` | DejaVu Sans |
+| `APOD_API_KEY` | free key from [api.nasa.gov](https://api.nasa.gov) | `DEMO_KEY` |
+| `APOD_DAYS` | how many days of APOD to fetch per run | `14` |
 | `APOD_TEXT` | `summary` / `full` / `none` | `summary` |
 
-`DEMO_KEY` alcanza para una corrida por día, pero conviene pedir una key propia (gratis, llega al instante por mail).
+`DEMO_KEY` is enough for one run a day, but getting your own key is better (free, arrives instantly by email).
 
-#### Textos, idioma y traducción
+#### Text, language and translation
 
-- **Webb y Hubble** llevan una leyenda corta abajo: título, fecha, constelación, distancia y crédito.
-- **APOD** lleva un **panel a la derecha** con título, fecha, crédito y la explicación. La imagen va entera a la izquierda: el texto nunca la tapa. El tamaño de letra se ajusta solo para que entre.
-- Fechas y distancias salen en el idioma elegido sin depender de nada externo. Los títulos y la explicación vienen en inglés; para traducirlos:
-  - `WEBB_TRANSLATE=claude` + `ANTHROPIC_API_KEY=...` (opcional `CLAUDE_MODEL`): traduce y además **resume la explicación de la APOD a 2 o 3 oraciones**, que es lo que se lee cómodo desde el sillón. Cada texto se procesa una sola vez y queda guardado; cuesta centavos por mes. **Recomendado.**
-  - `WEBB_TRANSLATE=argos`: offline con [Argos Translate](https://github.com/argosopentech/argos-translate) (`pip install argostranslate` + paquete en→es). Traduce pero no resume, así que el texto de la APOD queda largo.
-  - Sin traducción, la APOD muestra la explicación completa en inglés con letra más chica.
+- **Webb and Hubble** get a short caption at the bottom: title, date, constellation, distance and credit.
+- **APOD** gets a **panel on the right** with title, date, credit and the explanation. The whole image goes on the left: the text never covers it. The font size adjusts itself so everything fits.
+- Dates and distances are written in the chosen language with no external dependencies. Titles and explanations come in English from the sources; to translate or condense them:
+  - `WEBB_TRANSLATE=claude` + `ANTHROPIC_API_KEY=...` (optional `CLAUDE_MODEL`): translates when `WEBB_LANG=es`, and **condenses the APOD explanation to 2–3 sentences** (in any language), which is what reads comfortably from the couch. Each text is processed only once and cached; it costs cents per month. **Recommended.**
+  - `WEBB_TRANSLATE=argos`: offline with [Argos Translate](https://github.com/argosopentech/argos-translate) (`pip install argostranslate` + the en→es package). Translates but doesn't summarize, so the APOD text stays long.
+  - Without it, APOD shows the full explanation with a smaller font.
 
-Si cambiás idioma, resolución o textos, el script **re-renderiza todo desde el caché** sin volver a descargar.
+If you change language, resolution or text settings, the script **re-renders everything from the cache** without downloading again.
 
-#### Ver qué detecta de una imagen
+#### Inspect an image
 
 ```bash
-./scripts/webb_sync.py --debug potm2610a     # metadatos de Webb y si se acepta o descarta
+./scripts/webb_sync.py --debug potm2610a     # Webb metadata and whether it's accepted
 ```
 
-#### Automático, todos los días
+#### Run it daily
 
-La APOD sale una vez por día, así que el cron es **diario** (8:31 de la mañana):
+APOD is published once a day, so the cron is **daily** (8:31 AM here). Keys and language live in `.env`:
 
 ```bash
 crontab -l 2>/dev/null | grep -v webb | crontab -
-(crontab -l 2>/dev/null; echo "31 8 * * * WEBB_SIZE=1920x1080 WEBB_TRANSLATE=claude ANTHROPIC_API_KEY=sk-... APOD_API_KEY=... $PWD/scripts/webb_sync.py >/dev/null 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "31 8 * * * $PWD/scripts/webb_sync.py >/dev/null 2>&1") | crontab -
 ```
 
-El historial queda en `/srv/webb/.sync.log`.
+The run history is in `/srv/webb/.sync.log`.
 
-### 5. Configurar Aerial Views en la tele
+### 5. Configure Aerial Views on the TV
 
-1. Instalá **Aerial Views** desde Play Store.
-2. En la app, desactivá los videos de Apple y demás proveedores.
-3. Activá la fuente **Samba / SMB** con:
-   - Host: la IP del servidor (ej. `192.168.1.72`)
+1. Install **Aerial Views** from the Play Store.
+2. In the app, turn off the Apple videos and the other providers.
+3. Enable the **Samba / SMB** source with:
+   - Host: the server's IP (e.g. `192.168.1.72`)
    - Share: `webb`
-   - Usuario y contraseña de Samba
-4. Asegurate de que incluya **fotos**, no solo videos, y activá el **orden aleatorio**.
-5. Si hay una opción de escala de fotos, elegí **ajustar / fit** (no recortar ni estirar): las imágenes ya vienen del tamaño justo.
+   - Samba user and password
+4. Make sure it includes **photos**, not just videos, and turn on **shuffle**.
+5. If there's a photo scaling option, pick **fit** (not crop or stretch): the images already come at the exact size.
 
-### 6. Ponerlo como protector de pantalla
+### 6. Set it as the screensaver
 
-Android TV esconde la opción de elegir otro protector, así que se hace por adb:
+Android TV hides the option to pick another screensaver, so it's done over adb:
 
 ```bash
-./scripts/tv-screensaver.sh status    # 👈 anotá lo que devuelve (es tu original)
+./scripts/tv-screensaver.sh status    # 👈 write down what it returns (your original)
 ./scripts/tv-screensaver.sh aerial
-./scripts/tv-screensaver.sh test      # lo arranca ya, para probar
+./scripts/tv-screensaver.sh test      # starts it right away to check
 ```
 
-Si aparece una nebulosa: listo 🌌
+If a nebula shows up: done 🌌
 
 ---
 
-## Volver al protector original
+## Going back to the original screensaver
 
 ```bash
 ./scripts/tv-screensaver.sh restore
 ```
 
-El valor original **varía según la tele**. En la Skyworth es `com.google.android.backdrop/.Backdrop`; en otras es `com.google.android.apps.tv.dreamx/.service.Backdrop`. Usá el que te devolvió `status` antes de cambiar nada:
+The original value **varies by TV**. On the Skyworth it's `com.google.android.backdrop/.Backdrop`; on others it's `com.google.android.apps.tv.dreamx/.service.Backdrop`. Use whatever `status` returned before you changed anything:
 
 ```bash
-BACKDROP=<lo-que-anotaste> ./scripts/tv-screensaver.sh restore
+BACKDROP=<what-you-wrote-down> ./scripts/tv-screensaver.sh restore
 ```
 
 ---
 
-## Problemas comunes
+## Troubleshooting
 
-| Síntoma | Causa / solución |
+| Symptom | Cause / fix |
 |---|---|
-| `Connection refused` | adb no está escuchando. Activá **Depuración USB** y reiniciá la tele. Si existe **Depuración inalámbrica**, usá `adb pair` con el código que muestra la tele y después `adb tcpip 5555`. |
-| `failed to authenticate` / `unauthorized` | Falta aceptar el aviso en la tele. Apretá Home (que no esté en el protector) y reconectá. |
-| El aviso de autorización **no aparece** | En la tele: *Revocar autorizaciones de depuración USB* + apagar/prender Depuración USB. En el servidor: `adb kill-server && rm -f ~/.android/adbkey*` y reconectá. Si sigue, desenchufá la tele 10 s. |
-| Se pierde la autorización | No quedó tildado "Permitir siempre", o corriste `sudo adb` (root usa otra clave). Usá siempre adb sin sudo. |
-| Imágenes deformadas | `WEBB_SIZE` no coincide con la tele: revisá `adb shell wm size`. También revisá la escala de fotos en Aerial Views. |
-| La APOD casi no aparece | Activá el shuffle en Aerial Views o subí `POOL_APOD_WEIGHT`. |
-| Una fuente no trae nada | Mirá la salida o el `.sync.log`: si una página de categoría cambió de URL, se ajusta en `ESO_SITES`. |
-| Se coló una imagen con texto | Corré `--debug <id>` para ver su tipo y título. Si conviene, sumá la palabra a `TEXT_HINTS` en `webb_sync.py`. |
-| Pantalla negra en Aerial Views | El soporte SMB es quisquilloso con las rutas: usá un share simple, sin subcarpetas, con usuario y contraseña. |
+| `Connection refused` | adb isn't listening. Turn on **USB debugging** and restart the TV. If **Wireless debugging** exists, use `adb pair` with the code the TV shows, then `adb tcpip 5555`. |
+| `failed to authenticate` / `unauthorized` | The prompt on the TV hasn't been accepted. Press Home (so the screensaver isn't running) and reconnect. |
+| The authorization prompt **doesn't show up** | On the TV: *Revoke USB debugging authorizations* + toggle USB debugging off/on. On the server: `adb kill-server && rm -f ~/.android/adbkey*` and reconnect. If it still fails, unplug the TV for 10 s. |
+| Authorization keeps getting lost | "Always allow" wasn't checked, or you ran `sudo adb` (root uses a different key). Always run adb without sudo. |
+| Distorted images | `WEBB_SIZE` doesn't match the TV: check `adb shell wm size`. Also check the photo scaling in Aerial Views. |
+| APOD hardly ever shows up | Turn on shuffle in Aerial Views or raise `POOL_APOD_WEIGHT`. |
+| A source brings nothing | Check the output or `.sync.log`: if a category page moved, adjust it in `ESO_SITES`. |
+| An image with text slipped through | Run `--debug <id>` to see its type and title. If it makes sense, add the word to `TEXT_HINTS` in `webb_sync.py`. |
+| Black screen in Aerial Views | SMB support is picky about paths: use a simple share, no subfolders, with user and password. |
 
 ---
 
-## Cómo funciona `webb_sync.py`
+## How `webb_sync.py` works
 
-1. **APOD:** pide a `api.nasa.gov/planetary/apod` los últimos `APOD_DAYS` días. Descarta los videos y las imágenes de menos de 1000 px.
-2. **Webb y Hubble:** las dos usan la misma plataforma de ESA. Lee *Picture of the Month* / *Picture of the Week* y algunas categorías (se cambian en `ESO_SITES`), y de cada imagen nueva lee título, **Type**, fecha, constelación y distancia. Solo se quedan las de tipo `Observation` cuyo título no sugiera texto encima (*annotated*, *compass*, *spectrum*, *illustration*…).
-3. Baja el original (Webb/Hubble: `wallpaper_uhd` en 4K o `large`; APOD: `hdurl`) a `~/.cache/webb/raw`.
-4. Genera la versión para la tele en `~/.cache/webb/rendered`: imagen entera sin deformar, fondo desenfocado, y la leyenda o el panel de texto.
-5. Rearma la carpeta de la tele con el pool del día. Los archivos se escriben de forma atómica, así que la tele nunca ve uno a medias.
-
-## Próximo paso: vida artificial en la tele 🧬
-
-Un protector de pantalla de Android es solo un `DreamService`. La idea siguiente es una app mínima en Kotlin con un `WebView` que apunte a una simulación servida desde el servidor (ej. `http://gilbert.local:8080`), y que alterne con Webb según la hora: universo de día, puntos de vida artificial de noche.
+1. **APOD:** queries `api.nasa.gov/planetary/apod` for the last `APOD_DAYS` days. Skips videos and images narrower than 1000 px.
+2. **Webb and Hubble:** both run on the same ESA platform. It reads *Picture of the Month* / *Picture of the Week* and some categories (set in `ESO_SITES`), and for each new image reads the title, **Type**, date, constellation and distance. Only `Observation` images whose title doesn't suggest text on top (*annotated*, *compass*, *spectrum*, *illustration*…) are kept.
+3. Downloads the original (Webb/Hubble: `wallpaper_uhd` in 4K or `large`; APOD: `hdurl`) to `~/.cache/webb/raw`.
+4. Renders the TV version to `~/.cache/webb/rendered`: whole image without distortion, blurred background, and the caption or text panel.
+5. Rebuilds the TV folder with the daily pool. Files are written atomically, so the TV never sees a half-written one.
 
 ---
 
-## Créditos
+## Next step: artificial life on the TV 🧬
 
-- Imágenes: **ESA/Webb** y **ESA/Hubble** ([condiciones de uso](https://esawebb.org/copyright/)), y **NASA APOD** (cada foto tiene su autor y muchas tienen copyright propio; el crédito se muestra en el panel). Este proyecto es para uso personal en casa: antes de redistribuirlas, revisá los derechos de cada una.
-- Protector de pantalla: [Aerial Views](https://github.com/theothernt/AerialViews) de Neil Turner.
+An Android screensaver is just a `DreamService`. The next idea is a minimal Kotlin app with a `WebView` pointing to a simulation served from the home server (e.g. `http://gilbert.local:8080`), alternating with the space images by time of day: the universe during the day, artificial-life dots at night.
 
-## Licencia
+---
 
-Los scripts de este repo están bajo licencia [MIT](LICENSE).
+## Credits
+
+- Images: **ESA/Webb** and **ESA/Hubble** ([usage terms](https://esawebb.org/copyright/)), and **NASA APOD** (each picture has its own author and many carry their own copyright; the credit is shown in the panel). This project is meant for personal use at home: check the rights of each image before redistributing.
+- Screensaver: [Aerial Views](https://github.com/theothernt/AerialViews) by Neil Turner.
+
+## License
+
+The scripts in this repo are released under the [MIT](LICENSE) license.
