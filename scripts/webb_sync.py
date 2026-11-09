@@ -121,7 +121,8 @@ STOP_RE = "|".join(re.escape(s) for s in sorted(STOPS, key=len, reverse=True))
 
 APOD_API = "https://api.nasa.gov/planetary/apod"
 APOD_SITE = "https://science.nasa.gov/apod/"  # fallback when the API fails
-APOD_MIN_WIDTH = 1000  # very small ones look bad on a TV
+APOD_PARSER = 2  # bump to re-read APOD entries saved by an older parser
+APOD_MIN_WIDTH = 800  # very small ones look bad on a TV
 
 # ================================================================ text
 
@@ -262,6 +263,7 @@ def apod_items(api_key: str, days: int) -> list[tuple[str, callable]] | None:
                 "credit": re.sub(r"\s+", " ", (e.get("copyright") or "NASA")).strip(),
                 "urls": [u for u in (e.get("hdurl"), e.get("url")) if u],
                 "rejected": None,
+                "parser": "api",
             }
             if e.get("media_type") != "image":
                 meta["rejected"] = f"not an image ({e.get('media_type')})"
@@ -271,29 +273,52 @@ def apod_items(api_key: str, days: int) -> list[tuple[str, callable]] | None:
 
 
 def apod_scrape_items(days: int, known: set[str]) -> list[tuple[str, callable]]:
-    """Fallback: reads science.nasa.gov/apod/ and walks back day by day.
-    Stops at the first date already in the state."""
-    out = []
+    """Fallback: reads science.nasa.gov/apod/ and walks back through the
+    'Yesterday' links. Stops at the first known date or outside the window."""
+    oldest = (dt.date.today() - dt.timedelta(days=max(days, 1))).isoformat()
+    metas: list[dict] = []
+    titles: dict[str, str] = {}  # date -> title, from NASA's own link texts
     url = APOD_SITE
-    for _ in range(max(days, 1)):
+    for _ in range(max(days, 1) + 1):
         try:
             raw = get(url)
         except Exception as e:  # noqa: BLE001
             print(f"! APOD page {url}: {e}", file=sys.stderr)
             break
+        titles.update(apod_link_titles(raw))
         meta = apod_parse_page(raw, url)
-        if not meta.get("date"):
+        date = meta.get("date")
+        if not date:
             print(f"! APOD page {url}: could not find the date", file=sys.stderr)
             break
-        key = f"apod:{meta['date']}"
-        if key in known:
+        if date < oldest or f"apod:{date}" in known:
             break
-        out.append((key, lambda m=meta: m))
-        prev = apod_prev_link(raw, meta["date"])
+        metas.append(meta)
+        prev = apod_prev_link(raw, date, oldest)
         if not prev:
             break
         url = prev
         time.sleep(0.5)
+
+    for m in metas:  # the link texts beat whatever heading the page parser found
+        if titles.get(m["date"]):
+            m["title"] = titles[m["date"]]
+    return [(f"apod:{m['date']}", lambda m=m: m) for m in metas]
+
+
+APOD_LINK_TEXT = re.compile(
+    r"APOD:\s*(\d{4})\s+([A-Z][a-z]+)\s+(\d{1,2})\s*[–—-]\s*([^<\n]+?)\s*(?:<|$)")
+
+
+def apod_link_titles(raw: str) -> dict[str, str]:
+    """'Yesterday's Image APOD: 2026 November 7 – De Gerlache-Kocher Massif' → title by date."""
+    out = {}
+    for a in re.findall(r"(?is)<a\b[^>]*>(.*?)</a>", raw):
+        t = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", a))).strip()
+        m = APOD_LINK_TEXT.search(t + "<")
+        if m and m.group(2) in MONTHS_EN:
+            d = f"{m.group(1)}-{MONTHS_EN.index(m.group(2)) + 1:02d}-{int(m.group(3)):02d}"
+            out[d] = m.group(4).strip()
     return out
 
 
@@ -301,17 +326,21 @@ APOD_LINK = re.compile(
     r'href="(https://science\.nasa\.gov/image-article/apod-(\d{4})-([a-z]+)-(\d{1,2})-[^"]+?)"')
 
 
-def apod_prev_link(raw: str, iso: str) -> str | None:
-    """The link to the closest previous day found on the page."""
-    best = None
-    for m in APOD_LINK.finditer(raw):
-        month = m.group(3).capitalize()
-        if month not in MONTHS_EN:
+def apod_prev_link(raw: str, iso: str, oldest: str = "") -> str | None:
+    """The link to the previous day. Prefers links whose text says 'Yesterday';
+    never goes outside the requested window (pages also link to old APODs)."""
+    cands = []
+    for m in re.finditer(r'(?is)<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>', raw):
+        lm = APOD_LINK.search(f'href="{m.group(1)}"')
+        if not lm or lm.group(3).capitalize() not in MONTHS_EN:
             continue
-        d = f"{m.group(2)}-{MONTHS_EN.index(month) + 1:02d}-{int(m.group(4)):02d}"
-        if d < iso and (best is None or d > best[0]):
-            best = (d, m.group(1))
-    return best[1] if best else None
+        d = f"{lm.group(2)}-{MONTHS_EN.index(lm.group(3).capitalize()) + 1:02d}-{int(lm.group(4)):02d}"
+        if oldest <= d < iso:
+            cands.append((d, "yesterday" in m.group(2).lower(), lm.group(1)))
+    if not cands:
+        return None
+    yest = [c for c in cands if c[1]]
+    return max(yest or cands)[2]
 
 
 def apod_parse_page(raw: str, url: str) -> dict:
@@ -323,7 +352,7 @@ def apod_parse_page(raw: str, url: str) -> dict:
         m = re.search(rf"{label}:\s*(.*?)\s*(?={labels}:|Yesterday's Image|Tomorrow's Image|$)", text)
         return m.group(1).strip() if m else ""
 
-    meta: dict = {"source": "apod", "rejected": None}
+    meta: dict = {"source": "apod", "rejected": None, "parser": APOD_PARSER}
 
     d = re.search(r"Date:\s*([A-Z][a-z]+) (\d{1,2}), (\d{4})", text)
     if d and d.group(1) in MONTHS_EN:
@@ -334,13 +363,16 @@ def apod_parse_page(raw: str, url: str) -> dict:
             meta["date"] = (f"{m.group(2)}-{MONTHS_EN.index(m.group(3).capitalize()) + 1:02d}-"
                             f"{int(m.group(4)):02d}")
 
+    # Title: the heading closest before the "Date:" label (the menus have headings too)
     skip = {"astronomy picture of the day", "apod", "explanation", "related terms",
-            "discover more topics from nasa"}
-    for h in re.findall(r"(?is)<h[12][^>]*>(.*?)</h[12]>", raw):
-        t = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", h))).strip()
-        if t and t.lower() not in skip:
-            meta["title"] = t
-            break
+            "discover more topics from nasa", "suggested searches"}
+    date_pos = raw.find("Date:")
+    heads = [(m.start(), re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", m.group(1)))).strip())
+             for m in re.finditer(r"(?is)<h[1-3][^>]*>(.*?)</h[1-3]>", raw)]
+    heads = [h for h in heads if h[1] and h[1].lower() not in skip]
+    before = [h for h in heads if date_pos < 0 or h[0] < date_pos]
+    if before or heads:
+        meta["title"] = (before or heads)[-1 if before else 0][1]
 
     meta["credit"] = field(r"(?:Credit & Copyright|Image Credit|Credit)")[:120] or "NASA"
     meta["explanation"] = field("Explanation")[:2500]
@@ -715,6 +747,14 @@ def main() -> None:
         meta.update(source="webb", credit="ESA/Webb", file=f"{k}.jpg", rejected=old.get("rejected"),
                     urls=[f"{CDN}/wallpaper_uhd/{k}.jpg", f"{CDN}/large/{k}.jpg"])
         items[f"webb:{k}"] = meta
+
+    # APOD entries read by an older page parser get re-read (bad titles/dates)
+    for k in [k for k, v in items.items()
+              if v.get("source") == "apod" and v.get("parser") not in (APOD_PARSER, "api")]:
+        v = items.pop(k)
+        for d_ in (raw_dir, lib_dir):
+            if v.get("file"):
+                (d_ / v["file"]).unlink(missing_ok=True)
 
     render_key = hashlib.sha1(
         f"{W}x{H}|{a.lang}|{caption}|{a.translate}|{a.font}|{a.apod_text}|{RENDER_VERSION}"
