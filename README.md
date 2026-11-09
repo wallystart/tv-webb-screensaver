@@ -2,12 +2,16 @@
 
 Convierte el protector de pantalla de una **Android TV** en una ventana al universo: imágenes del **telescopio James Webb** que se actualizan solas cada semana.
 
-En lugar de las mismas fotos de fotógrafos de siempre (el *Backdrop* de Google), la tele muestra nebulosas, galaxias y la *Picture of the Month* de ESA/Webb, en 4K cuando está disponible.
+En lugar de las mismas fotos de fotógrafos de siempre (el *Backdrop* de Google), la tele muestra nebulosas, galaxias y la *Picture of the Month* de ESA/Webb:
+
+- **Sin deformar:** cada imagen se encaja en la resolución exacta de la tele y los bordes se rellenan con la misma imagen desenfocada.
+- **Con leyenda:** título, fecha, constelación y distancia, en español o inglés.
+- **Solo fotos reales:** se descartan gráficos, espectros y versiones con brújula o etiquetas.
 
 ```
 ┌──────────────────────┐   cron semanal    ┌───────────────────┐
 │  esawebb.org (CDN)   │ ───────────────▶  │  Servidor casero  │
-│  imágenes nuevas     │   webb-sync.sh    │  /srv/webb        │
+│  imágenes + datos    │   webb_sync.py    │  /srv/webb        │
 └──────────────────────┘                   │  (share Samba)    │
                                            └─────────┬─────────┘
                                                      │ SMB
@@ -33,7 +37,7 @@ Probado con una **Skyworth con Android TV** y una mini PC con Ubuntu como servid
 
 ```
 scripts/
-├── webb-sync.sh        # baja imágenes nuevas de ESA/Webb (solo las que faltan)
+├── webb_sync.py       # baja, filtra, encaja y agrega leyenda a las imágenes
 ├── setup-samba.sh      # crea la carpeta compartida para la tele
 └── tv-screensaver.sh   # conecta por adb y cambia el protector de pantalla
 ```
@@ -79,18 +83,49 @@ Aparece un aviso en la tele: tildá **"Permitir siempre desde esta computadora"*
 
 Te pide una contraseña de Samba: es la que vas a cargar en la tele. Por defecto comparte `/srv/webb` como `webb`, con tu usuario.
 
-### 4. Bajar las imágenes
+### 4. Bajar y preparar las imágenes
 
 ```bash
-./scripts/webb-sync.sh
-ls /srv/webb | wc -l               # la primera vez baja ~150
-file /srv/webb/*.jpg | grep -v JPEG   # no debería mostrar nada
+sudo apt install -y python3-pil fonts-dejavu-core
+adb shell wm size                       # resolución real de la tele, ej. 1920x1080 o 3840x2160
+export WEBB_SIZE=3840x2160              # poné la que devolvió
+./scripts/webb_sync.py --prune          # --prune borra las que quedaron descartadas
 ```
 
-Y para que se actualice solo **todos los lunes a las 9**:
+La primera vez tarda: lee la página de cada imagen y las procesa. Después solo trabaja con las nuevas.
+
+#### Configuración
+
+Todo se ajusta con variables de entorno (o con el flag equivalente, ver `--help`):
+
+| Variable | Valores | Default |
+|---|---|---|
+| `WEBB_DEST` | carpeta que lee la tele | `/srv/webb` |
+| `WEBB_CACHE` | originales y estado (fuera del share) | `~/.cache/webb` |
+| `WEBB_SIZE` | resolución de la tele | `3840x2160` |
+| `WEBB_LANG` | `es` / `en` | `es` |
+| `WEBB_CAPTION` | `1` con leyenda / `0` sin leyenda | `1` |
+| `WEBB_TRANSLATE` | `none` / `claude` / `argos` (traducción del título) | `none` |
+| `WEBB_FONT` | ruta a un `.ttf` | DejaVu Sans |
+
+La fecha y la distancia se escriben en el idioma elegido sin depender de nada externo. El **título** viene en inglés desde ESA; para traducirlo:
+
+- `WEBB_TRANSLATE=claude` + `ANTHROPIC_API_KEY=...` (opcional `CLAUDE_MODEL`). Cuesta centavos y cada título se traduce una sola vez: queda guardado.
+- `WEBB_TRANSLATE=argos`: offline, con [Argos Translate](https://github.com/argosopentech/argos-translate) (`pip install argostranslate` y el paquete en→es).
+
+Si cambiás idioma, resolución o leyenda, el script **re-renderiza todo desde el caché** sin volver a descargar.
+
+#### Ver qué detecta de una imagen
 
 ```bash
-(crontab -l 2>/dev/null; echo "0 9 * * 1 $PWD/scripts/webb-sync.sh >/dev/null 2>&1") | crontab -
+./scripts/webb_sync.py --debug potm2610a     # metadatos y si se acepta o descarta
+./scripts/webb_sync.py --only potm2610a      # procesar solo esa
+```
+
+#### Automático, todos los lunes a las 9
+
+```bash
+(crontab -l 2>/dev/null; echo "0 9 * * 1 WEBB_SIZE=3840x2160 $PWD/scripts/webb_sync.py >/dev/null 2>&1") | crontab -
 ```
 
 El historial queda en `/srv/webb/.sync.log`.
@@ -104,6 +139,7 @@ El historial queda en `/srv/webb/.sync.log`.
    - Share: `webb`
    - Usuario y contraseña de Samba
 4. Asegurate de que incluya **fotos**, no solo videos.
+5. Si hay una opción de escala de fotos, elegí **ajustar / fit** (no recortar ni estirar): las imágenes ya vienen del tamaño justo.
 
 ### 6. Ponerlo como protector de pantalla
 
@@ -141,23 +177,18 @@ BACKDROP=<lo-que-anotaste> ./scripts/tv-screensaver.sh restore
 | `failed to authenticate` / `unauthorized` | Falta aceptar el aviso en la tele. Apretá Home (que no esté en el protector) y reconectá. |
 | El aviso de autorización **no aparece** | En la tele: *Revocar autorizaciones de depuración USB* + apagar/prender Depuración USB. En el servidor: `adb kill-server && rm -f ~/.android/adbkey*` y reconectá. Si sigue, desenchufá la tele 10 s. |
 | Se pierde la autorización | No quedó tildado "Permitir siempre", o corriste `sudo adb` (root usa otra clave). Usá siempre adb sin sudo. |
-| Muchos `404` en `webb-sync.sh` | Normal en versiones viejas del script: muchas imágenes no tienen versión 4K y se baja la `large`. La versión actual ya silencia ese error. |
+| Imágenes deformadas | `WEBB_SIZE` no coincide con la tele: revisá `adb shell wm size`. También revisá la escala de fotos en Aerial Views. |
+| Se coló una imagen con texto | Corré `--debug <id>` para ver su tipo y título. Si conviene, sumá la palabra a `TEXT_HINTS` en `webb_sync.py`. |
 | Pantalla negra en Aerial Views | El soporte SMB es quisquilloso con las rutas: usá un share simple, sin subcarpetas, con usuario y contraseña. |
 
 ---
 
-## Cómo funciona `webb-sync.sh`
+## Cómo funciona `webb_sync.py`
 
-Cada imagen de ESA/Webb tiene un ID (por ejemplo `weic2516a`) y versiones publicadas en un CDN con URLs predecibles:
-
-```
-https://cdn.esawebb.org/archives/images/wallpaper_uhd/<id>.jpg   # 3840×2160
-https://cdn.esawebb.org/archives/images/large/<id>.jpg           # fallback
-```
-
-El script lee las páginas de *Picture of the Month* y de algunas categorías (nebulosas, galaxias, estrellas, agujeros negros, primeras imágenes), extrae los IDs, y baja solo los que todavía no están. Las categorías se pueden cambiar en el array `PAGES`.
-
----
+1. Lee las páginas de *Picture of the Month* y de algunas categorías (nebulosas, galaxias, estrellas, agujeros negros, primeras imágenes) y extrae los IDs, por ejemplo `potm2610a`. Las categorías se cambian en `PAGES`.
+2. Para cada ID nuevo lee su página: título, **Type**, fecha, constelación y distancia. Solo se quedan las de tipo `Observation` cuyo título no sugiera texto encima (*annotated*, *compass*, *spectrum*, *illustration*…).
+3. Baja el original del CDN (`wallpaper_uhd` en 4K y, si no existe, `large`) a un caché fuera del share.
+4. Genera la versión para la tele: imagen entera centrada, fondo desenfocado y oscurecido, leyenda abajo con un degradé para que se lea sobre cualquier imagen. La escritura es atómica, así que la tele nunca ve un archivo a medias.
 
 ## Próximo paso: vida artificial en la tele 🧬
 
