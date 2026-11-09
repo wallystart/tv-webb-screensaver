@@ -443,15 +443,23 @@ def claude(prompt: str, max_tokens: int = 400) -> str:
 
 LANG_NAME = {"es": "neutral Latin American Spanish", "en": "English"}
 
+# Translation health for this run. After an auth error (bad API key) we stop
+# trying; images rendered with an untranslated text are re-rendered next run.
+TRANSLATE = {"disabled": False, "failed": False}
+
 
 def localize(title: str, body: str, lang: str, how: str, summarize: bool,
              cache: dict) -> tuple[str, str]:
-    """Translates title and text (and summarizes the text if asked). Caches the result."""
+    """Translates title and text (and summarizes the text if asked). Caches the result.
+    On failure returns the originals and sets TRANSLATE['failed']."""
     if how == "none" or (lang == "en" and not summarize):
         return title, body
     key = hashlib.sha1(f"{how}|{lang}|{summarize}|{title}|{body}".encode()).hexdigest()
     if key in cache:
         return tuple(cache[key])
+    if TRANSLATE["disabled"]:
+        TRANSLATE["failed"] = True
+        return title, body
     try:
         if how == "claude":
             if lang == "en":
@@ -477,7 +485,13 @@ def localize(title: str, body: str, lang: str, how: str, summarize: bool,
         else:
             return title, body
     except Exception as e:  # noqa: BLE001
-        print(f"! translation failed ({how}): {e}", file=sys.stderr)
+        TRANSLATE["failed"] = True
+        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
+            TRANSLATE["disabled"] = True
+            print(f"! translation disabled for this run ({how}): {e} — check ANTHROPIC_API_KEY. "
+                  "Texts stay untranslated and will be retried on the next run.", file=sys.stderr)
+        else:
+            print(f"! translation failed ({how}): {e}", file=sys.stderr)
         return title, body
     cache[key] = list(out)
     return out
@@ -684,17 +698,20 @@ def sync_pool(pool: dict[str, Path], dest: Path) -> None:
 # ---------------------------------------------------------------- main
 
 def load_env_file() -> None:
-    """Loads KEY=VALUE lines from the repo's .env (if any). Real env vars win."""
+    """Loads KEY=VALUE lines from the repo's .env (if any). Real env vars win;
+    within the file, a later line overrides an earlier one (as in a shell)."""
     f = Path(__file__).resolve().parent.parent / ".env"
     if not f.exists():
         return
+    values: dict[str, str] = {}
     for line in f.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        v = re.sub(r"\s+#.*$", "", v).strip().strip('"').strip("'")  # inline comments
-        os.environ.setdefault(k.strip(), v)
+        values[k.strip()] = re.sub(r"\s+#.*$", "", v).strip().strip('"').strip("'")  # inline comments
+    for k, v in values.items():
+        os.environ.setdefault(k, v)
 
 
 def main() -> None:
@@ -772,6 +789,10 @@ def main() -> None:
     render_key = hashlib.sha1(
         f"{W}x{H}|{a.lang}|{caption}|{a.translate}|{a.font}|{a.apod_text}|{TEXT_WIDTH}|{RENDER_VERSION}"
         .encode()).hexdigest()[:10]
+    # Rendered while translation was failing: kept until the API key changes,
+    # then re-rendered (and translated). Avoids re-rendering daily for nothing.
+    untranslated_key = "untranslated-" + hashlib.sha1(
+        f"{render_key}|{os.environ.get('ANTHROPIC_API_KEY', '')}".encode()).hexdigest()[:10]
 
     todo: list[tuple[str, callable | None]] = []
     if a.only:
@@ -830,9 +851,10 @@ def main() -> None:
             time.sleep(1)
 
         out = lib_dir / it["file"]
-        if it.get("render_key") == render_key and out.exists():
+        if it.get("render_key") in (render_key, untranslated_key) and out.exists():
             continue
 
+        TRANSLATE["failed"] = False
         try:
             with Image.open(raw) as im:
                 im.load()
@@ -877,7 +899,9 @@ def main() -> None:
             continue
 
         stats["rerender" if "render_key" in it else "new"] += 1
-        it["render_key"] = render_key
+        # Untranslated because translation failed: show it anyway, but retry next run
+        it["render_key"] = untranslated_key if TRANSLATE["failed"] else render_key
+        TRANSLATE["failed"] = False
         print(f"+ {key}  {it.get('title', '')}")
         state_f.write_text(json.dumps(state, ensure_ascii=False, indent=1))
 
