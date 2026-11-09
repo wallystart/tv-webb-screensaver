@@ -1,40 +1,58 @@
 #!/usr/bin/env python3
 """
-webb_sync.py — Baja imágenes nuevas de ESA/Webb y las prepara para la tele.
+webb_sync.py — Baja imágenes del espacio y las prepara para la tele.
 
-Para cada imagen:
-  1. Lee su página en esawebb.org (título, tipo, fecha, constelación, distancia).
-  2. Descarta las que no son observaciones reales (gráficos, versiones con
-     brújula/etiquetas, ilustraciones).
-  3. La encaja SIN deformar en un lienzo con la resolución de la tele,
-     rellenando los bordes con la misma imagen desenfocada.
-  4. Opcionalmente le agrega una leyenda: título, fecha, constelación, distancia.
+Fuentes:
+  webb    ESA/Webb: Picture of the Month + categorías (nebulosas, galaxias…).
+  hubble  ESA/Hubble: Picture of the Week + categorías.
+          Webb y Hubble llevan leyenda corta abajo: título · fecha · constelación · distancia.
+  apod    NASA Astronomy Picture of the Day (api.nasa.gov).
+        La explicación va en un PANEL LATERAL, nunca encima de la imagen.
+        Con WEBB_TRANSLATE=claude se traduce y se resume para leer desde el sillón.
 
-Los originales quedan en un caché fuera de la carpeta compartida, así que
-cambiar el idioma o la resolución re-renderiza sin volver a descargar.
+Pool diario: la carpeta de la tele no tiene todo, sino una selección que se
+rearma en cada corrida: la APOD más reciente repetida varias veces (para que
+pase seguido), las APOD de los días anteriores, y una muestra al azar de
+Webb + Hubble que cambia cada día. La biblioteca completa queda en el caché.
 
-Configuración (variables de entorno o flags):
-  WEBB_DEST      carpeta que lee la tele              (/srv/webb)
-  WEBB_CACHE     originales + estado                   (~/.cache/webb)
-  WEBB_LANG      es | en                               (es)
-  WEBB_SIZE      resolución de la tele                 (3840x2160)
-  WEBB_CAPTION   1 = con leyenda, 0 = sin leyenda      (1)
-  WEBB_TRANSLATE none | claude | argos                 (none)
-  WEBB_FONT      ruta a un .ttf                        (DejaVu Sans)
+Cada imagen se encaja SIN deformar en la resolución de la tele y los bordes
+se rellenan con la misma imagen desenfocada. Los originales quedan en un caché
+fuera de la carpeta compartida: cambiar idioma/resolución re-renderiza sin
+volver a descargar.
+
+Configuración (variables de entorno o flags, ver --help):
+  WEBB_SOURCES   webb,hubble,apod                       (webb,hubble,apod)
+  WEBB_DEST      carpeta que lee la tele                (/srv/webb)
+  WEBB_CACHE     originales + estado                    (~/.cache/webb)
+  WEBB_LANG      es | en                                (es)
+  WEBB_SIZE      resolución de la tele                  (1920x1080)
+  WEBB_CAPTION   1 = con textos, 0 = imagen sola        (1)
+  WEBB_TRANSLATE none | claude | argos                  (none)
+  WEBB_FONT      ruta a un .ttf                         (DejaVu Sans)
+  APOD_API_KEY   key de api.nasa.gov                    (DEMO_KEY)
+  APOD_DAYS      cuántos días hacia atrás traer         (14)
+  APOD_TEXT      summary | full | none                  (summary)
+  POOL_APOD_WEIGHT  copias de la APOD más reciente       (8)
+  POOL_APOD_RECENT  APOD anteriores, una vez cada una    (6)
+  POOL_RANDOM       imágenes al azar de Webb + Hubble    (40)
   ANTHROPIC_API_KEY / CLAUDE_MODEL   para WEBB_TRANSLATE=claude
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import html
 import io
 import json
 import os
+import random
+import shutil
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -45,18 +63,37 @@ except ImportError:
 
 Image.MAX_IMAGE_PIXELS = None  # algunas originales de Webb son enormes
 
-SITE = "https://esawebb.org"
-CDN = "https://cdn.esawebb.org/archives/images"
 UA = "tv-webb-screensaver (+https://github.com/wallystart/tv-webb-screensaver)"
+RENDER_VERSION = "v4"
 
-PAGES = [
-    "/images/potm/",
-    "/images/archive/category/nebulae/",
-    "/images/archive/category/galaxies/",
-    "/images/archive/category/stars/",
-    "/images/archive/category/quasarsblackholes/",
-    "/images/archive/category/firstimages/",
-]
+# ================================================================ ESA/Webb
+
+# Webb y Hubble usan la misma plataforma (mismos campos y mismas URLs del CDN)
+ESO_SITES = {
+    "webb": {
+        "domain": "esawebb.org", "credit": "ESA/Webb", "prefix": "",
+        "pages": [
+            "/images/potm/",
+            "/images/archive/category/nebulae/",
+            "/images/archive/category/galaxies/",
+            "/images/archive/category/stars/",
+            "/images/archive/category/quasarsblackholes/",
+            "/images/archive/category/firstimages/",
+        ],
+    },
+    "hubble": {
+        "domain": "esahubble.org", "credit": "ESA/Hubble", "prefix": "hubble-",
+        "pages": [
+            "/images/potw/",
+            "/images/archive/category/nebulae/",
+            "/images/archive/category/galaxies/",
+            "/images/archive/category/starclusters/",
+            "/images/archive/category/stars/",
+        ],
+    },
+}
+SITE = "https://esawebb.org"  # para --debug
+CDN = "https://cdn.esawebb.org/archives/images"
 SKIP_IDS = {"potm", "archive", "search", "page", "viewall", "zoomable"}
 
 # Títulos que delatan versiones con texto/gráficos encima
@@ -77,11 +114,17 @@ STOPS = LABELS + [
 ]
 STOP_RE = "|".join(re.escape(s) for s in sorted(STOPS, key=len, reverse=True))
 
+# ================================================================ APOD
+
+APOD_API = "https://api.nasa.gov/planetary/apod"
+APOD_MIN_WIDTH = 1000  # las muy chicas se ven mal en la tele
+
+# ================================================================ textos
+
 MONTHS_EN = ["January", "February", "March", "April", "May", "June", "July",
              "August", "September", "October", "November", "December"]
 MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
              "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-
 UNITS_ES = {
     "light years": "años luz", "light year": "año luz",
     "million": "millones", "billion": "mil millones",
@@ -97,23 +140,24 @@ def get(url: str, binary: bool = False, timeout: int = 60):
     return data if binary else data.decode("utf-8", "replace")
 
 
-def list_ids() -> list[str]:
+# ---------------------------------------------------------------- Webb
+
+def eso_list_ids(site: dict) -> list[str]:
     ids: set[str] = set()
-    for p in PAGES:
+    dom = site["domain"]
+    for p in site["pages"]:
         try:
-            page = get(SITE + p)
+            page = get(f"https://{dom}{p}")
         except Exception as e:  # noqa: BLE001
-            print(f"! no pude leer {p}: {e}", file=sys.stderr)
+            print(f"! no pude leer {dom}{p}: {e}", file=sys.stderr)
             continue
         for m in re.finditer(
-                r'href="(?:https://esawebb\.org)?/images/([A-Za-z0-9_-]+)/"', page):
+                rf'href="(?:https://(?:www\.)?{re.escape(dom)})?/images/([A-Za-z0-9_-]+)/"', page):
             if m.group(1) not in SKIP_IDS:
                 ids.add(m.group(1))
         time.sleep(0.5)
     return sorted(ids)
 
-
-# ---------------------------------------------------------------- metadatos
 
 def page_text(raw: str) -> str:
     raw = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw)
@@ -121,20 +165,19 @@ def page_text(raw: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(raw)).strip()
 
 
-def parse_meta(raw: str) -> dict:
+def webb_parse_meta(raw: str) -> dict:
     meta: dict = {}
-
     m = (re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', raw)
          or re.search(r'<meta[^>]+content="([^"]*)"[^>]+property="og:title"', raw)
          or re.search(r"<title>(.*?)</title>", raw, re.S))
     if m:
-        meta["title"] = re.sub(r"\s*\|\s*ESA/Webb\s*$", "",
+        meta["title"] = re.sub(r"\s*\|\s*ESA/(?:Webb|Hubble)\s*$", "",
                                html.unescape(m.group(1)).strip())
 
     text = page_text(raw)
     fields: dict[str, list[str]] = {}
-    for m in re.finditer(rf"\b({'|'.join(map(re.escape, LABELS))}):\s*(.*?)\s*(?=(?:{STOP_RE})\b|$)",
-                         text):
+    for m in re.finditer(
+            rf"\b({'|'.join(map(re.escape, LABELS))}):\s*(.*?)\s*(?=(?:{STOP_RE})\b|$)", text):
         val = m.group(2).strip()[:160]
         if val:
             fields.setdefault(m.group(1), []).append(val)
@@ -145,12 +188,12 @@ def parse_meta(raw: str) -> dict:
             meta[key.lower()] = fields[key][0]
 
     d = re.search(r"Release date:\s*(\d{1,2}) (\w+) (\d{4})", text)
-    if d:
-        meta["date"] = {"day": int(d.group(1)), "month": d.group(2), "year": int(d.group(3))}
+    if d and d.group(2) in MONTHS_EN:
+        meta["date"] = f"{d.group(3)}-{MONTHS_EN.index(d.group(2)) + 1:02d}-{int(d.group(1)):02d}"
     return meta
 
 
-def keep_reason(meta: dict) -> str | None:
+def webb_reject(meta: dict) -> str | None:
     """None = se queda. Si no, el motivo para descartarla."""
     title = meta.get("title", "")
     if TEXT_HINTS.search(title):
@@ -161,14 +204,73 @@ def keep_reason(meta: dict) -> str | None:
     return None
 
 
+def eso_items(name: str) -> list[tuple[str, callable]]:
+    """Lista de (clave, función que devuelve el item) para Webb o Hubble."""
+    site = ESO_SITES[name]
+    dom, cdn = site["domain"], f"https://cdn.{site['domain']}/archives/images"
+
+    def make(img_id):
+        def fetch():
+            meta = webb_parse_meta(get(f"https://{dom}/images/{img_id}/"))
+            time.sleep(0.5)
+            meta.update(source=name, credit=site["credit"],
+                        file=f"{site['prefix']}{img_id}.jpg",
+                        urls=[f"{cdn}/wallpaper_uhd/{img_id}.jpg", f"{cdn}/large/{img_id}.jpg"],
+                        rejected=webb_reject(meta))
+            return meta
+        return fetch
+    return [(f"{name}:{i}", make(i)) for i in eso_list_ids(site)]
+
+
+# ---------------------------------------------------------------- APOD
+
+def apod_items(api_key: str, days: int) -> list[tuple[str, callable]]:
+    end = dt.date.today()
+    start = end - dt.timedelta(days=max(days - 1, 0))
+    url = f"{APOD_API}?" + urllib.parse.urlencode(
+        {"api_key": api_key, "start_date": start.isoformat(), "end_date": end.isoformat()})
+    try:
+        entries = json.loads(get(url))
+    except urllib.error.HTTPError as e:
+        if e.code == 400:  # el APOD de hoy todavía no salió (zona horaria de EE.UU.)
+            url = url.replace(end.isoformat(), (end - dt.timedelta(days=1)).isoformat())
+            entries = json.loads(get(url))
+        else:
+            print(f"! APOD: {e}", file=sys.stderr)
+            return []
+    except Exception as e:  # noqa: BLE001
+        print(f"! APOD: {e}", file=sys.stderr)
+        return []
+
+    out = []
+    for e in entries if isinstance(entries, list) else [entries]:
+        def fetch(e=e):
+            meta = {
+                "source": "apod",
+                "file": f"apod-{e['date']}.jpg",
+                "title": e.get("title", "").strip(),
+                "date": e["date"],
+                "explanation": e.get("explanation", "").strip(),
+                "credit": re.sub(r"\s+", " ", (e.get("copyright") or "NASA")).strip(),
+                "urls": [u for u in (e.get("hdurl"), e.get("url")) if u],
+                "rejected": None,
+            }
+            if e.get("media_type") != "image":
+                meta["rejected"] = f"no es imagen ({e.get('media_type')})"
+            return meta
+        out.append((f"apod:{e['date']}", fetch))
+    return out
+
+
 # ---------------------------------------------------------------- textos
 
-def fmt_date(d: dict | None, lang: str) -> str:
-    if not d:
+def fmt_date(iso: str | None, lang: str) -> str:
+    if not iso:
         return ""
-    if lang == "es" and d["month"] in MONTHS_EN:
-        return f"{d['day']} de {MONTHS_ES[MONTHS_EN.index(d['month'])]} de {d['year']}"
-    return f"{d['month']} {d['day']}, {d['year']}"
+    y, m, d = (int(x) for x in iso.split("-"))
+    if lang == "es":
+        return f"{d} de {MONTHS_ES[m - 1]} de {y}"
+    return f"{MONTHS_EN[m - 1]} {d}, {y}"
 
 
 def fmt_distance(s: str | None, lang: str) -> str:
@@ -192,50 +294,67 @@ def fmt_distance(s: str | None, lang: str) -> str:
     return f"{num} {unit}".strip()
 
 
-def translate(text: str, lang: str, how: str, cache: dict) -> str:
-    if lang == "en" or how == "none" or not text:
-        return text
-    key = f"{how}:{lang}:{text}"
-    if key in cache:
-        return cache[key]
-    out = text
-    try:
-        if how == "claude":
-            out = _translate_claude(text, lang)
-        elif how == "argos":
-            import argostranslate.translate as at  # type: ignore
-            out = at.translate(text, "en", lang)
-    except Exception as e:  # noqa: BLE001
-        print(f"! traducción falló ({how}): {e}", file=sys.stderr)
-        return text
-    cache[key] = out
-    return out
-
-
-def _translate_claude(text: str, lang: str) -> str:
-    key = os.environ["ANTHROPIC_API_KEY"]
+def claude(prompt: str, max_tokens: int = 400) -> str:
     body = json.dumps({
         "model": os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5"),
-        "max_tokens": 200,
-        "messages": [{"role": "user", "content":
-            f"Traducí al idioma '{lang}' este título de una imagen astronómica. "
-            f"Natural y corto, sin comillas ni explicación:\n\n{text}"}],
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
     }).encode()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages", data=body, headers={
-            "x-api-key": key, "anthropic-version": "2023-06-01",
+            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "anthropic-version": "2023-06-01",
             "content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        data = json.load(r)
-    return data["content"][0]["text"].strip().strip('"')
+    with urllib.request.urlopen(req, timeout=90) as r:
+        return json.load(r)["content"][0]["text"].strip()
+
+
+LANG_NAME = {"es": "español rioplatense neutro (sin voseo forzado)", "en": "English"}
+
+
+def localize(title: str, body: str, lang: str, how: str, summarize: bool,
+             cache: dict) -> tuple[str, str]:
+    """Traduce título y texto (y resume el texto si se pide). Cachea el resultado."""
+    if how == "none" or (lang == "en" and not summarize):
+        return title, body
+    key = hashlib.sha1(f"{how}|{lang}|{summarize}|{title}|{body}".encode()).hexdigest()
+    if key in cache:
+        return tuple(cache[key])
+    try:
+        if how == "claude":
+            task = ("Traducí y resumí" if summarize else "Traducí") if lang != "en" else "Resumí"
+            extra = (" El texto resumido: 50 a 80 palabras, 2 o 3 oraciones, fiel al "
+                     "original, que se entienda sin la imagen de al lado; sin links ni "
+                     "referencias tipo 'clic aquí'.") if summarize else ""
+            raw = claude(
+                f"{task} al idioma {LANG_NAME[lang]} el título y el texto de esta imagen "
+                f"astronómica, para mostrar en una tele.{extra} Respondé SOLO con JSON "
+                f'{{"title": "...", "text": "..."}}.\n\nTITLE: {title}\n\nTEXT: {body}',
+                max_tokens=600)
+            data = json.loads(re.search(r"\{.*\}", raw, re.S).group(0))
+            out = (data.get("title") or title, data.get("text") or body)
+        elif how == "argos":
+            if lang == "en":
+                return title, body
+            import argostranslate.translate as at  # type: ignore
+            out = (at.translate(title, "en", lang), at.translate(body, "en", lang) if body else "")
+        else:
+            return title, body
+    except Exception as e:  # noqa: BLE001
+        print(f"! traducción falló ({how}): {e}", file=sys.stderr)
+        return title, body
+    cache[key] = list(out)
+    return out
 
 
 # ---------------------------------------------------------------- render
 
-def load_font(path: str | None, size: int):
-    for p in filter(None, [path,
-                           "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                           "/usr/share/fonts/TTF/DejaVuSans.ttf"]):
+def load_font(path: str | None, size: int, bold: bool = False):
+    names = ["DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"]
+    cands = [path] if path else []
+    for n in names:
+        cands += [f"/usr/share/fonts/truetype/dejavu/{n}", f"/usr/share/fonts/TTF/{n}"]
+    for p in cands:
         try:
             return ImageFont.truetype(p, size)
         except OSError:
@@ -243,47 +362,179 @@ def load_font(path: str | None, size: int):
     return ImageFont.load_default(size)
 
 
-def render(src: Image.Image, W: int, H: int, title: str, line2: str,
-           caption: bool, font_path: str | None) -> Image.Image:
-    src = src.convert("RGB")
+def backdrop(src: Image.Image, W: int, H: int, dim: float) -> Image.Image:
+    """La imagen cubriendo todo el lienzo, desenfocada y oscurecida."""
     sw, sh = src.size
-
-    # Fondo: la misma imagen cubriendo todo, desenfocada y oscurecida
     cover = max(W / sw, H / sh)
     bg = src.resize((max(W, round(sw * cover)), max(H, round(sh * cover))), Image.LANCZOS)
     left, top = (bg.width - W) // 2, (bg.height - H) // 2
     bg = bg.crop((left, top, left + W, top + H))
-    bg = bg.resize((W // 8, H // 8)).filter(ImageFilter.GaussianBlur(6)).resize((W, H))
-    bg = Image.eval(bg, lambda v: int(v * 0.35))
+    bg = bg.resize((max(1, W // 8), max(1, H // 8))).filter(ImageFilter.GaussianBlur(6)).resize((W, H))
+    return Image.eval(bg, lambda v: int(v * dim))
 
-    # Frente: la imagen entera, sin deformar
-    fit = min(W / sw, H / sh)
-    fg = src.resize((round(sw * fit), round(sh * fit)), Image.LANCZOS)
-    bg.paste(fg, ((W - fg.width) // 2, (H - fg.height) // 2))
 
-    if caption and (title or line2):
-        canvas = bg.convert("RGBA")
-        # Degradé abajo para que el texto se lea sobre cualquier imagen
-        grad_h = int(H * 0.28)
-        grad = Image.new("L", (1, grad_h))
-        for y in range(grad_h):
-            grad.putpixel((0, y), int(190 * (y / grad_h) ** 1.6))
-        shade = Image.new("RGBA", (W, grad_h), (0, 0, 0, 0))
-        shade.putalpha(grad.resize((W, grad_h)))
-        canvas.alpha_composite(shade, (0, H - grad_h))
+def paste_fit(canvas: Image.Image, src: Image.Image, box: tuple[int, int, int, int]) -> None:
+    """Pega la imagen entera, sin deformar, centrada dentro de box."""
+    x0, y0, x1, y1 = box
+    bw, bh = x1 - x0, y1 - y0
+    fit = min(bw / src.width, bh / src.height)
+    fg = src.resize((max(1, round(src.width * fit)), max(1, round(src.height * fit))), Image.LANCZOS)
+    canvas.paste(fg, (x0 + (bw - fg.width) // 2, y0 + (bh - fg.height) // 2))
 
-        d = ImageDraw.Draw(canvas)
-        m = int(W * 0.035)
-        f1 = load_font(font_path, int(H * 0.030))
-        f2 = load_font(font_path, int(H * 0.019))
-        y2 = H - m - f2.size
-        y1 = y2 - int(f1.size * 1.35)
-        if title:
-            d.text((m, y1), title, font=f1, fill=(255, 255, 255, 235))
-        if line2:
-            d.text((m, y2), line2, font=f2, fill=(220, 220, 220, 200))
-        bg = canvas.convert("RGB")
-    return bg
+
+def wrap(draw: ImageDraw.ImageDraw, text: str, font, maxw: int) -> list[str]:
+    lines: list[str] = []
+    for para in text.split("\n"):
+        line = ""
+        for word in para.split():
+            test = f"{line} {word}".strip()
+            if draw.textlength(test, font=font) <= maxw or not line:
+                line = test
+            else:
+                lines.append(line)
+                line = word
+        lines.append(line)
+    return lines
+
+
+def render_caption(src, W, H, title, line2, font_path):
+    """Webb: imagen entera + leyenda corta abajo a la izquierda."""
+    src = src.convert("RGB")
+    canvas = backdrop(src, W, H, 0.35)
+    paste_fit(canvas, src, (0, 0, W, H))
+    if not (title or line2):
+        return canvas
+
+    canvas = canvas.convert("RGBA")
+    grad_h = int(H * 0.28)
+    grad = Image.new("L", (1, grad_h))
+    for y in range(grad_h):
+        grad.putpixel((0, y), int(190 * (y / grad_h) ** 1.6))
+    shade = Image.new("RGBA", (W, grad_h), (0, 0, 0, 0))
+    shade.putalpha(grad.resize((W, grad_h)))
+    canvas.alpha_composite(shade, (0, H - grad_h))
+
+    d = ImageDraw.Draw(canvas)
+    m = int(W * 0.035)
+    f1 = load_font(font_path, int(H * 0.032))
+    f2 = load_font(font_path, int(H * 0.021))
+    y2 = H - m - f2.size
+    y1 = y2 - int(f1.size * 1.35)
+    if title:
+        d.text((m, y1), title, font=f1, fill=(255, 255, 255, 235))
+    if line2:
+        d.text((m, y2), line2, font=f2, fill=(220, 220, 220, 200))
+    return canvas.convert("RGB")
+
+
+def render_panel(src, W, H, title, meta_line, body, font_path):
+    """APOD: imagen entera a la izquierda, texto en un panel a la derecha.
+    El texto nunca tapa la imagen."""
+    src = src.convert("RGB")
+    canvas = backdrop(src, W, H, 0.30)
+
+    panel_w = int(W * 0.32) if body else int(W * 0.24)
+    gap = int(W * 0.02)
+    paste_fit(canvas, src, (gap, gap, W - panel_w - gap, H - gap))
+
+    canvas = canvas.convert("RGBA")
+    overlay = Image.new("RGBA", (panel_w, H), (0, 0, 0, 110))
+    canvas.alpha_composite(overlay, (W - panel_w, 0))
+    d = ImageDraw.Draw(canvas)
+
+    pad = int(W * 0.022)
+    x, maxw = W - panel_w + pad, panel_w - 2 * pad
+    avail = H - 2 * pad
+
+    # Busca el tamaño de letra más grande con el que entra todo
+    sentences = re.split(r"(?<=[.!?])\s+", body) if body else []
+    hi, lo = int(H * 0.030), int(H * 0.021)
+
+    def layout(sz, sents):
+        ft = load_font(font_path, int(sz * 1.45), bold=True)
+        fm = load_font(font_path, int(sz * 0.82))
+        fb = load_font(font_path, sz)
+        tl = wrap(d, title, ft, maxw) if title else []
+        ml = wrap(d, meta_line, fm, maxw) if meta_line else []
+        bl = wrap(d, " ".join(sents), fb, maxw) if sents else []
+        h = (len(tl) * ft.size * 1.2 + len(ml) * fm.size * 1.35 + fm.size
+             + len(bl) * fb.size * 1.42)
+        return h, (ft, fm, fb, tl, ml, bl)
+
+    chosen = None
+    for sz in range(hi, lo - 1, -1):
+        h, lay = layout(sz, sentences)
+        if h <= avail:
+            chosen = lay
+            break
+    if chosen is None:  # ni con la letra mínima: recorta por oraciones
+        sents = list(sentences)
+        while sents:
+            sents.pop()
+            h, lay = layout(lo, sents + (["…"] if sents else []))
+            if h <= avail:
+                chosen = lay
+                break
+        if chosen is None:
+            chosen = layout(lo, [])[1]
+
+    ft, fm, fb, tl, ml, bl = chosen
+    total = (len(tl) * ft.size * 1.2 + len(ml) * fm.size * 1.35 + fm.size
+             + len(bl) * fb.size * 1.42)
+    y = pad + max(0, (avail - total) / 2)  # centrado vertical en el panel
+    for ln in tl:
+        d.text((x, y), ln, font=ft, fill=(255, 255, 255, 240))
+        y += ft.size * 1.2
+    for ln in ml:
+        d.text((x, y), ln, font=fm, fill=(190, 200, 215, 210))
+        y += fm.size * 1.35
+    y += fm.size
+    for ln in bl:
+        d.text((x, y), ln, font=fb, fill=(232, 232, 232, 230))
+        y += fb.size * 1.42
+    return canvas.convert("RGB")
+
+
+# ---------------------------------------------------------------- pool
+
+def build_pool(items: dict, lib: Path, weight: int, recent: int, n_random: int) -> dict[str, Path]:
+    """Arma el pool del día: {nombre en la carpeta de la tele: archivo en la biblioteca}."""
+    ok = {k: v for k, v in items.items()
+          if not v.get("rejected") and (lib / v["file"]).exists()}
+    pool: dict[str, Path] = {}
+
+    apods = sorted((v for v in ok.values() if v["source"] == "apod"),
+                   key=lambda v: v["date"], reverse=True)
+    if apods:
+        latest = lib / apods[0]["file"]
+        for i in range(1, max(weight, 1) + 1):
+            pool[f"apod-hoy-{i}.jpg"] = latest
+        for v in apods[1:1 + recent]:
+            pool[v["file"]] = lib / v["file"]
+
+    rest = sorted(v["file"] for v in ok.values() if v["source"] in ESO_SITES)
+    rng = random.Random(dt.date.today().isoformat())  # misma selección todo el día
+    for f in rng.sample(rest, min(n_random, len(rest))):
+        pool[f] = lib / f
+    return pool
+
+
+def sync_pool(pool: dict[str, Path], dest: Path) -> None:
+    """Deja en dest exactamente los archivos del pool (hardlink si se puede)."""
+    for f in dest.glob("*.jpg"):
+        if f.name not in pool:
+            f.unlink()
+    for name, src in pool.items():
+        out = dest / name
+        if out.exists() and out.stat().st_ino == src.stat().st_ino:
+            continue
+        tmp = dest / f".{name}.tmp"  # atómico: la tele nunca ve un archivo a medias
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(src, tmp)
+        except OSError:
+            shutil.copy2(src, tmp)
+        tmp.replace(out)
 
 
 # ---------------------------------------------------------------- main
@@ -292,120 +543,171 @@ def main() -> None:
     env = os.environ.get
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sources", default=env("WEBB_SOURCES", "webb,hubble,apod"))
     ap.add_argument("--dest", default=env("WEBB_DEST", "/srv/webb"))
     ap.add_argument("--cache", default=env("WEBB_CACHE", str(Path.home() / ".cache/webb")))
     ap.add_argument("--lang", default=env("WEBB_LANG", "es"), choices=["es", "en"])
-    ap.add_argument("--size", default=env("WEBB_SIZE", "3840x2160"))
+    ap.add_argument("--size", default=env("WEBB_SIZE", "1920x1080"))
     ap.add_argument("--caption", default=env("WEBB_CAPTION", "1"))
     ap.add_argument("--translate", default=env("WEBB_TRANSLATE", "none"),
                     choices=["none", "claude", "argos"])
     ap.add_argument("--font", default=env("WEBB_FONT"))
-    ap.add_argument("--prune", action="store_true",
-                    help="borra de DEST los .jpg que no son imágenes aceptadas")
-    ap.add_argument("--only", nargs="*", help="procesar solo estos IDs (para probar)")
-    ap.add_argument("--debug", metavar="ID", help="muestra los metadatos de un ID y sale")
+    ap.add_argument("--apod-key", default=env("APOD_API_KEY", "DEMO_KEY"))
+    ap.add_argument("--apod-days", type=int, default=int(env("APOD_DAYS", "14")))
+    ap.add_argument("--apod-text", default=env("APOD_TEXT", "summary"),
+                    choices=["summary", "full", "none"])
+    ap.add_argument("--apod-weight", type=int, default=int(env("POOL_APOD_WEIGHT", "8")))
+    ap.add_argument("--apod-recent", type=int, default=int(env("POOL_APOD_RECENT", "6")))
+    ap.add_argument("--random", type=int, default=int(env("POOL_RANDOM", "40")))
+    ap.add_argument("--prune", action="store_true", help=argparse.SUPPRESS)  # compat: el pool ya limpia
+    ap.add_argument("--only", nargs="*", help="procesar solo estas claves (ej. webb:potm2610a apod:2026-11-08)")
+    ap.add_argument("--debug", metavar="ID", help="muestra los metadatos de un ID de Webb y sale")
     a = ap.parse_args()
 
     if a.debug:
-        meta = parse_meta(get(f"{SITE}/images/{a.debug}/"))
+        meta = webb_parse_meta(get(f"{SITE}/images/{a.debug}/"))
         print(json.dumps(meta, indent=2, ensure_ascii=False))
-        print("descartada:" if keep_reason(meta) else "aceptada", keep_reason(meta) or "")
+        r = webb_reject(meta)
+        print(f"descartada: {r}" if r else "aceptada")
         return
 
     W, H = (int(x) for x in a.size.lower().split("x"))
     caption = a.caption not in ("0", "false", "no")
+    sources = {s.strip() for s in a.sources.split(",") if s.strip()}
+    summarize = a.apod_text == "summary" and a.translate == "claude"
+
     dest, cache = Path(a.dest), Path(a.cache)
-    raw_dir = cache / "raw"
-    dest.mkdir(parents=True, exist_ok=True)
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir, lib_dir = cache / "raw", cache / "rendered"
+    for d_ in (dest, raw_dir, lib_dir):
+        d_.mkdir(parents=True, exist_ok=True)
 
     state_f = cache / "state.json"
     state = json.loads(state_f.read_text()) if state_f.exists() else {}
     items: dict = state.setdefault("items", {})
     tcache: dict = state.setdefault("translations", {})
 
-    # Si cambia la configuración visual, se re-renderiza todo desde el caché
-    render_key = hashlib.sha1(
-        f"{W}x{H}|{a.lang}|{caption}|{a.translate}|{a.font}|v2".encode()).hexdigest()[:10]
+    # Migración desde la versión que solo tenía Webb (claves sin prefijo)
+    for k in [k for k in items if ":" not in k]:
+        old = items.pop(k)
+        meta = old.get("meta", {})
+        if isinstance(meta.get("date"), dict):
+            dd = meta["date"]
+            if dd.get("month") in MONTHS_EN:
+                meta["date"] = f"{dd['year']}-{MONTHS_EN.index(dd['month']) + 1:02d}-{dd['day']:02d}"
+        meta.update(source="webb", credit="ESA/Webb", file=f"{k}.jpg", rejected=old.get("rejected"),
+                    urls=[f"{CDN}/wallpaper_uhd/{k}.jpg", f"{CDN}/large/{k}.jpg"])
+        items[f"webb:{k}"] = meta
 
-    ids = a.only or list_ids()
+    render_key = hashlib.sha1(
+        f"{W}x{H}|{a.lang}|{caption}|{a.translate}|{a.font}|{a.apod_text}|{RENDER_VERSION}"
+        .encode()).hexdigest()[:10]
+
+    todo: list[tuple[str, callable | None]] = []
+    if a.only:
+        todo = [(k, None) for k in a.only]
+    else:
+        for name in ESO_SITES:
+            if name in sources:
+                todo += eso_items(name)
+        if "apod" in sources:
+            todo += apod_items(a.apod_key, a.apod_days)
+
     stats = {"new": 0, "rerender": 0, "skipped": 0, "failed": 0}
 
-    for img_id in ids:
-        it = items.get(img_id)
-
+    for key, fetch in todo:
+        it = items.get(key)
         if it is None:
+            if fetch is None:
+                print(f"! {key}: no está en el estado; corré sin --only primero", file=sys.stderr)
+                continue
             try:
-                meta = parse_meta(get(f"{SITE}/images/{img_id}/"))
-                time.sleep(0.5)
+                it = items[key] = fetch()
             except Exception as e:  # noqa: BLE001
-                print(f"! {img_id}: no pude leer la página ({e})", file=sys.stderr)
+                print(f"! {key}: no pude leer los datos ({e})", file=sys.stderr)
                 stats["failed"] += 1
                 continue
-            reason = keep_reason(meta)
-            it = items[img_id] = {"meta": meta, "rejected": reason}
-            if reason:
-                print(f"- {img_id}: {reason}")
+            if it.get("rejected"):
+                print(f"- {key}: {it['rejected']}")
 
         if it.get("rejected"):
             stats["skipped"] += 1
             continue
 
-        raw = raw_dir / f"{img_id}.jpg"
+        raw = raw_dir / it["file"]
         if not raw.exists() or raw.stat().st_size == 0:
-            for variant in ("wallpaper_uhd", "large"):
+            for url in it["urls"]:
                 try:
-                    raw.write_bytes(get(f"{CDN}/{variant}/{img_id}.jpg", binary=True))
+                    raw.write_bytes(get(url, binary=True, timeout=120))
                     break
-                except urllib.error.HTTPError:
+                except Exception:  # noqa: BLE001
                     continue
             else:
-                print(f"! {img_id}: no hay imagen descargable", file=sys.stderr)
+                print(f"! {key}: no hay imagen descargable", file=sys.stderr)
                 stats["failed"] += 1
                 raw.unlink(missing_ok=True)
                 continue
             time.sleep(1)
 
-        out = dest / f"{img_id}.jpg"
+        out = lib_dir / it["file"]
         if it.get("render_key") == render_key and out.exists():
             continue
 
-        meta = it["meta"]
-        title = translate(meta.get("title", ""), a.lang, a.translate, tcache)
-        parts = [fmt_date(meta.get("date"), a.lang),
-                 meta.get("constellation", ""),
-                 fmt_distance(meta.get("distance"), a.lang),
-                 "ESA/Webb"]
-        line2 = "  ·  ".join(p for p in parts if p)
-
         try:
             with Image.open(raw) as im:
-                img = render(im, W, H, title, line2, caption, a.font)
+                im.load()
+                if it["source"] == "apod" and im.width < APOD_MIN_WIDTH:
+                    it["rejected"] = f"muy chica ({im.width}px)"
+                    print(f"- {key}: {it['rejected']}")
+                    stats["skipped"] += 1
+                    continue
+
+                if it["source"] in ESO_SITES:
+                    title = ""
+                    line2 = ""
+                    if caption:
+                        title, _ = localize(it.get("title", ""), "", a.lang, a.translate,
+                                            False, tcache)
+                        parts = [fmt_date(it.get("date"), a.lang), it.get("constellation", ""),
+                                 fmt_distance(it.get("distance"), a.lang),
+                                 it.get("credit", "ESA/Webb")]
+                        line2 = "  ·  ".join(p for p in parts if p)
+                    img = render_caption(im, W, H, title, line2, a.font)
+                else:
+                    if caption:
+                        body = "" if a.apod_text == "none" else it.get("explanation", "")
+                        title, body = localize(it.get("title", ""), body, a.lang,
+                                               a.translate, summarize and bool(body), tcache)
+                        credit = it.get("credit", "NASA")
+                        credit = credit if credit == "NASA" else f"© {credit}"
+                        apod_name = "Foto astronómica del día" if a.lang == "es" else "Astronomy Picture of the Day"
+                        meta_line = f"{apod_name}  ·  {fmt_date(it.get('date'), a.lang)}  ·  {credit}"
+                        img = render_panel(im, W, H, title, meta_line, body, a.font)
+                    else:
+                        img = render_caption(im, W, H, "", "", a.font)
+
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=90, optimize=True, progressive=True)
             tmp = out.with_suffix(".tmp")
             tmp.write_bytes(buf.getvalue())
-            tmp.replace(out)  # atómico: la tele nunca ve un archivo a medias
+            tmp.replace(out)
         except Exception as e:  # noqa: BLE001
-            print(f"! {img_id}: error al procesar ({e})", file=sys.stderr)
+            print(f"! {key}: error al procesar ({e})", file=sys.stderr)
             stats["failed"] += 1
             continue
 
         stats["rerender" if "render_key" in it else "new"] += 1
         it["render_key"] = render_key
-        print(f"+ {img_id}  {title}")
+        print(f"+ {key}  {it.get('title', '')}")
         state_f.write_text(json.dumps(state, ensure_ascii=False, indent=1))
 
-    if a.prune:
-        keep = {f"{k}.jpg" for k, v in items.items() if not v.get("rejected")}
-        for f in dest.glob("*.jpg"):
-            if f.name not in keep:
-                f.unlink()
-                print(f"x {f.name}")
+    pool = build_pool(items, lib_dir, a.apod_weight, a.apod_recent, a.random)
+    sync_pool(pool, dest)
+    stats["pool"] = len(pool)
 
     state_f.write_text(json.dumps(state, ensure_ascii=False, indent=1))
     summary = (f"{stats['new']} nuevas, {stats['rerender']} re-renderizadas, "
-               f"{stats['skipped']} descartadas, {stats['failed']} con error")
+               f"{stats['skipped']} descartadas, {stats['failed']} con error  |  "
+               f"pool de hoy: {stats.get('pool', 0)} archivos")
     with open(dest / ".sync.log", "a") as log:
         log.write(time.strftime("%F %T") + " — " + summary + "\n")
     print("Listo:", summary)
