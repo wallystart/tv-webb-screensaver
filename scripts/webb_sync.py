@@ -82,7 +82,7 @@ except ImportError:
 Image.MAX_IMAGE_PIXELS = None  # some Webb originals are huge
 
 UA = "tv-webb-screensaver (+https://github.com/wallystart/tv-webb-screensaver)"
-RENDER_VERSION = "v5"
+RENDER_VERSION = "v6"
 
 # ================================================================ ESA/Webb
 
@@ -236,7 +236,22 @@ def webb_parse_meta(raw: str) -> dict:
     d = re.search(r"Release date:\s*(\d{1,2}) (\w+) (\d{4})", text)
     if d and d.group(2) in MONTHS_EN:
         meta["date"] = f"{d.group(3)}-{MONTHS_EN.index(d.group(2)) + 1:02d}-{int(d.group(1)):02d}"
+    meta["description"] = eso_description(raw)
     return meta
+
+
+def eso_description(raw: str) -> str:
+    """The press text under the image: the paragraphs after the <h1>, up to the
+    'About the Image' box. Source for the short caption description."""
+    start = raw.find("<h1")
+    if start < 0:
+        return ""
+    end = min([i for i in (raw.find(s, start) for s in ("About the Image", "Image Formats")) if i > 0]
+              or [len(raw)])
+    body = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw[start:end])
+    paras = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", p))).strip()
+             for p in re.findall(r"(?is)<p\b[^>]*>(.*?)</p>", body)]
+    return " ".join(p for p in paras if len(p) > 40)[:3000]
 
 
 def webb_reject(meta: dict) -> str | None:
@@ -793,6 +808,46 @@ def localize(title: str, body: str, lang: str, how: str, summarize: bool,
     return out
 
 
+def describe(title: str, text: str, lang: str, how: str, cache: dict) -> str:
+    """One or two short sentences for a Webb/Hubble caption: what the telescope
+    is looking at and why it's interesting. Needs WEBB_TRANSLATE=claude; without
+    it, English gets the first sentence of the press text and other languages
+    get nothing (better no text than text in the wrong language)."""
+    if not text:
+        return ""
+    if how != "claude":
+        if lang != "en":
+            return ""
+        for s in re.split(r"(?<=[.!?])\s+", text)[:4]:  # skip "In this Picture of the Week…"
+            if len(s) <= 200 and not re.search(r"Picture of the (Week|Month)|Telescope", s):
+                return s
+        return ""
+    key = hashlib.sha1(f"desc|{lang}|{title}|{text}".encode()).hexdigest()
+    if key in cache:
+        return cache[key]
+    if TRANSLATE["disabled"]:
+        TRANSLATE["failed"] = True
+        return ""
+    try:
+        out = claude(
+            f"Below is the press text of a space telescope image titled {title!r}. Write a "
+            f"caption for a TV screensaver, in {LANG_NAME[lang]}: one or two short sentences, "
+            "at most 28 words in total. Say what the telescope is pointed at and what makes "
+            "it interesting: what astronomers are trying to see, a finding, or a curiosity. "
+            "Be concrete and plain; no hype, don't start with 'This image' or repeat the "
+            "title, and leave out the distance and constellation (already shown). "
+            f"Reply with the caption only.\n\nTEXT: {text}", max_tokens=200)
+        out = re.sub(r"\s+", " ", out).strip().strip('"«»')
+    except Exception as e:  # noqa: BLE001
+        TRANSLATE["failed"] = True
+        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
+            TRANSLATE["disabled"] = True
+        print(f"! description failed: {e}", file=sys.stderr)
+        return ""
+    cache[key] = out
+    return out
+
+
 # ---------------------------------------------------------------- render
 
 def load_font(path: str | None, size: int, bold: bool = False):
@@ -864,28 +919,34 @@ def bottom_shade(canvas, W, H, height, strength=190):
     canvas.alpha_composite(shade, (0, H - height))
 
 
-def render_caption(src, W, H, title, line2, font_path):
-    """Webb/Hubble: whole image + short caption centered at the bottom."""
+def render_caption(src, W, H, title, line2, font_path, desc=""):
+    """Webb/Hubble: whole image + short caption centered at the bottom:
+    title, an optional one-or-two-line description, and the data line."""
     src = src.convert("RGB")
     canvas = backdrop(src, W, H, 0.35)
     paste_fit(canvas, src, (0, 0, W, H))
-    if not (title or line2):
+    if not (title or line2 or desc):
         return canvas
 
     canvas = canvas.convert("RGBA")
-    bottom_shade(canvas, W, H, int(H * 0.30))
+    bottom_shade(canvas, W, H, int(H * (0.38 if desc else 0.30)))
     d = ImageDraw.Draw(canvas)
     maxw = int(W * TEXT_WIDTH)
     f1 = load_font(font_path, int(H * 0.032))
+    fd = load_font(font_path, int(H * 0.023))
     f2 = load_font(font_path, int(H * 0.021))
-    tl = wrap(d, title, f1, maxw)[:2] if title else []
+    tl = clamp_lines(d, wrap(d, title, f1, maxw), f1, maxw, 2) if title else []
+    dl = clamp_lines(d, wrap(d, desc, fd, maxw), fd, maxw, 2) if desc else []
     ml = wrap(d, line2, f2, maxw) if line2 else []
-    h = len(tl) * f1.size * 1.25 + (f2.size * 0.5 if tl and ml else 0) + len(ml) * f2.size * 1.35
+    blocks = [(lines, f, sp, col) for lines, f, sp, col in (
+        (tl, f1, 1.25, (255, 255, 255, 235)),
+        (dl, fd, 1.35, (235, 235, 235, 225)),
+        (ml, f2, 1.35, (200, 200, 200, 205))) if lines]
+    gap = f2.size * 0.5
+    h = sum(len(b[0]) * b[1].size * b[2] for b in blocks) + gap * (len(blocks) - 1)
     y = H - int(H * 0.05) - h
-    y = draw_centered(d, tl, f1, y, W, (255, 255, 255, 235), 1.25)
-    if tl and ml:
-        y += f2.size * 0.5
-    draw_centered(d, ml, f2, y, W, (220, 220, 220, 205), 1.35)
+    for lines, f, sp, col in blocks:
+        y = draw_centered(d, lines, f, y, W, col, sp) + gap
     return canvas.convert("RGB")
 
 
@@ -1282,6 +1343,15 @@ def main() -> None:
                 print(f"- {key}: {it['rejected']}")
 
         elif it.get("source") in ESO_SITES:
+            if caption and "description" not in it and not it.get("rejected"):
+                # Saved by a version that didn't keep the press text: read the page once more
+                site = ESO_SITES[it["source"]]
+                img_id = it["file"][len(site["prefix"]):-len(".jpg")]
+                try:
+                    it["description"] = eso_description(get(f"https://{site['domain']}/images/{img_id}/"))
+                    time.sleep(0.5)
+                except Exception as e:  # noqa: BLE001
+                    print(f"! {key}: could not read its description ({e})", file=sys.stderr)
             reason = webb_reject(it)  # filters may have changed since it was fetched
             if reason != it.get("rejected"):
                 it["rejected"] = reason
@@ -1324,14 +1394,17 @@ def main() -> None:
                 if it["source"] in ESO_SITES:
                     title = ""
                     line2 = ""
+                    desc = ""
                     if caption:
                         title, _ = localize(it.get("title", ""), "", a.lang, a.translate,
                                             False, tcache)
+                        desc = describe(it.get("title", ""), it.get("description", ""),
+                                        a.lang, a.translate, tcache)
                         parts = [fmt_date(it.get("date"), a.lang), it.get("constellation", ""),
                                  fmt_distance(it.get("distance"), a.lang),
                                  it.get("credit", "ESA/Webb")]
                         line2 = "  ·  ".join(p for p in parts if p)
-                    img = render_caption(im, W, H, title, line2, a.font)
+                    img = render_caption(im, W, H, title, line2, a.font, desc)
                 elif it["source"] == "art":
                     title = it.get("title", "") if caption else ""
                     parts = [it.get("artist", ""), it.get("year", ""), it.get("museum", "")]
