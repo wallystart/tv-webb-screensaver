@@ -1,0 +1,131 @@
+# Paintings for the "art" pool. One per line:  Title | Artist
+#
+# - Use the English title (it's searched on Wikidata); the TV shows the title,
+#   artist and museum in WEBB_LANG.
+# - The artist only has to match the creator's name on Wikidata word by word:
+#   "Van Gogh" matches "Vincent van Gogh".
+# - If a title is ambiguous (several versions of the same painting), pin the
+#   exact Wikidata item with a third field:  Sunflowers | Vincent van Gogh | Q...
+# - Public domain only: stick to artists who died more than ~70 years ago.
+# - Resolved items are pinned in paintings.lock.json (commit it). Delete a
+#   line's entry there to resolve it again.
+
+# Renaissance and before
+Mona Lisa | Leonardo da Vinci
+Lady with an Ermine | Leonardo da Vinci
+The Last Supper | Leonardo da Vinci
+The Birth of Venus | Sandro Botticelli
+Primavera | Sandro Botticelli
+The Creation of Adam | Michelangelo
+The School of Athens | Raphael
+Sistine Madonna | Raphael
+The Arnolfini Portrait | Jan van Eyck
+The Garden of Earthly Delights | Hieronymus Bosch
+The Ambassadors | Hans Holbein the Younger
+Venus of Urbino | Titian
+Bacchus and Ariadne | Titian
+The Tempest | Giorgione
+The Wedding at Cana | Paolo Veronese
+The Hunters in the Snow | Pieter Brueghel the Elder
+Netherlandish Proverbs | Pieter Brueghel the Elder
+The Peasant Wedding | Pieter Brueghel the Elder
+The Triumph of Death | Pieter Brueghel the Elder
+The Tower of Babel | Pieter Brueghel the Elder | Q15293656
+The Burial of the Count of Orgaz | El Greco
+View of Toledo | El Greco
+
+# Baroque
+The Calling of Saint Matthew | Caravaggio
+Judith Beheading Holofernes | Caravaggio
+Las Meninas | Diego Velázquez
+The Surrender of Breda | Diego Velázquez
+The Young Beggar | Bartolomé Esteban Murillo
+The Night Watch | Rembrandt
+The Anatomy Lesson of Dr. Nicolaes Tulp | Rembrandt
+The Return of the Prodigal Son | Rembrandt | Q512755
+Girl with a Pearl Earring | Johannes Vermeer
+The Milkmaid | Johannes Vermeer
+View of Delft | Johannes Vermeer
+The Art of Painting | Johannes Vermeer
+The Lacemaker | Johannes Vermeer
+Young Woman with a Water Pitcher | Johannes Vermeer
+The Laughing Cavalier | Frans Hals
+
+# 18th century
+The Swing | Jean-Honoré Fragonard
+The Blue Boy | Thomas Gainsborough
+Oath of the Horatii | Jacques-Louis David
+The Death of Marat | Jacques-Louis David
+The Death of Socrates | Jacques-Louis David
+
+# Romanticism and the 19th century
+The Third of May 1808 | Francisco Goya
+Saturn Devouring His Son | Francisco Goya
+Wanderer above the Sea of Fog | Caspar David Friedrich
+Chalk Cliffs on Rügen | Caspar David Friedrich
+The Sea of Ice | Caspar David Friedrich
+The Monk by the Sea | Caspar David Friedrich
+The Fighting Temeraire | J. M. W. Turner
+Rain, Steam and Speed – The Great Western Railway | J. M. W. Turner
+The Hay Wain | John Constable
+Liberty Leading the People | Eugène Delacroix
+The Raft of the Medusa | Théodore Géricault
+Grande Odalisque | Jean-Auguste-Dominique Ingres
+The Valpinçon Bather | Jean-Auguste-Dominique Ingres
+The Great Wave off Kanagawa | Katsushika Hokusai
+Fine Wind, Clear Morning | Katsushika Hokusai
+The Gleaners | Jean-François Millet
+Ophelia | John Everett Millais
+The Lady of Shalott | John William Waterhouse
+Flaming June | Frederic Leighton
+The Ninth Wave | Ivan Aivazovsky
+Barge Haulers on the Volga | Ilya Repin
+Washington Crossing the Delaware | Emanuel Leutze
+The Gross Clinic | Thomas Eakins
+Whistler's Mother | James McNeill Whistler
+
+# Impressionism and after
+Olympia | Édouard Manet
+Le Déjeuner sur l'herbe | Édouard Manet
+A Bar at the Folies-Bergère | Édouard Manet
+Impression, Sunrise | Claude Monet
+Woman with a Parasol – Madame Monet and Her Son | Claude Monet
+The Magpie | Claude Monet
+Bridge over a Pond of Water Lilies | Claude Monet
+Bal du moulin de la Galette | Pierre-Auguste Renoir
+Luncheon of the Boating Party | Pierre-Auguste Renoir
+Dance at Bougival | Pierre-Auguste Renoir
+L'Absinthe | Edgar Degas
+Blue Dancers | Edgar Degas
+Paris Street; Rainy Day | Gustave Caillebotte
+The Floor Scrapers | Gustave Caillebotte | Q1766454
+The Child's Bath | Mary Cassatt
+A Sunday Afternoon on the Island of La Grande Jatte | Georges Seurat
+The Basket of Apples | Paul Cézanne
+The Card Players | Paul Cézanne | Q1165042
+Where Do We Come From? What Are We? Where Are We Going? | Paul Gauguin
+Tahitian Women on the Beach | Paul Gauguin
+The Sleeping Gypsy | Henri Rousseau
+Tiger in a Tropical Storm | Henri Rousseau
+The Starry Night | Vincent van Gogh
+Café Terrace at Night | Vincent van Gogh
+Starry Night Over the Rhône | Vincent van Gogh
+Sunflowers | Vincent van Gogh | Q21948567
+Bedroom in Arles | Vincent van Gogh | Q18713070
+Wheatfield with Crows | Vincent van Gogh
+Almond Blossoms | Vincent van Gogh
+Irises | Vincent van Gogh
+The Potato Eaters | Vincent van Gogh
+Self-Portrait with Bandaged Ear | Vincent van Gogh
+Walk on the Beach | Joaquín Sorolla
+Sad Inheritance | Joaquín Sorolla
+
+# Early 20th century (artists who died before 1945)
+The Kiss | Gustav Klimt
+Portrait of Adele Bloch-Bauer I | Gustav Klimt
+Judith and the Head of Holofernes | Gustav Klimt
+The Scream | Edvard Munch | Q18891156
+The Dance of Life | Edvard Munch | Q3208135
+Composition VIII | Wassily Kandinsky
+Composition with Red, Blue and Yellow | Piet Mondrian
+American Gothic | Grant Wood

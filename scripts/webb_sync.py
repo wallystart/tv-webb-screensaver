@@ -12,10 +12,18 @@ Sources:
           With WEBB_TRANSLATE=claude it is translated and summarized so it
           can be read from the couch.
 
-Daily pool: the TV folder doesn't hold everything, but a selection rebuilt on
-every run: the latest APOD repeated several times (so it shows up often), the
-APODs from previous days, and a random sample of Webb + Hubble that changes
-every day. The full library stays in the cache.
+  art     Public-domain paintings from art/paintings.txt ('Title | Artist'),
+          resolved on Wikidata (pinned in art/paintings.lock.json) and
+          downloaded from Wikimedia Commons. Caption below the painting:
+          title · artist · year · museum, in WEBB_LANG.
+
+Daily pools: the TV folder doesn't hold everything, but a selection rebuilt on
+every run. "space": the latest APOD repeated several times (so it shows up
+often), the APODs from previous days, and a random sample of Webb + Hubble that
+changes every day. "art": the painting of the day repeated (no repeats until
+the whole list has been shown) plus a random sample. Both pools live in the
+cache; SCHEDULE decides which one the TV folder shows at each hour, and
+--pool-only switches it from an hourly cron without touching the network.
 
 Every image is fit into the TV resolution WITHOUT distortion, and the empty
 borders are filled with a blurred copy of the same image. Originals are kept in
@@ -38,12 +46,18 @@ Configuration (environment variables or flags, see --help):
   POOL_APOD_WEIGHT  copies of the latest APOD           (8)
   POOL_APOD_RECENT  previous APODs, once each           (6)
   POOL_RANDOM       random Webb + Hubble images         (40)
+  SCHEDULE       space | art | alternate | space:8-19,art:20-7   (space)
+  ART_LIST       the painting list                      (art/paintings.txt)
+  POOL_ART_WEIGHT   copies of the painting of the day   (6)
+  POOL_ART_RANDOM   random paintings                    (30)
+  ART_FETCH_WIDTH   download width from Commons         (1920)
   ANTHROPIC_API_KEY / CLAUDE_MODEL   for WEBB_TRANSLATE=claude
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import html
 import io
@@ -54,6 +68,7 @@ import shutil
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -125,6 +140,20 @@ APOD_SITE = "https://science.nasa.gov/apod/"  # fallback when the API fails
 APOD_PARSER = 2  # bump to re-read APOD entries saved by an older parser
 APOD_MIN_WIDTH = 800  # very small ones look bad on a TV
 
+# ================================================================ art
+
+ART_LIST = Path(__file__).resolve().parent.parent / "art" / "paintings.txt"
+WD_API = "https://www.wikidata.org/w/api.php"
+WD_SPARQL = "https://query.wikidata.org/sparql"
+COMMONS_FILE = "https://commons.wikimedia.org/wiki/Special:FilePath/"
+# An item counts as a painting if its "instance of" (P31) is one of these or a
+# subclass. Prints are allowed so that Hokusai's woodblock prints qualify.
+ART_CLASSES = {"Q3305213": "painting", "Q11060274": "print"}
+# When several items fit a line, take the best known one only if it has at
+# least this many times the Wikipedia articles (sitelinks) of the next one.
+ART_DOMINANCE = 5
+ART_LANGS = "en|es|fr|de|it|nl|pt|ja|ru|nb"  # creator names compared against the list
+
 # ================================================================ text
 
 MONTHS_EN = ["January", "February", "March", "April", "May", "June", "July",
@@ -139,10 +168,21 @@ UNITS_ES = {
 
 # ---------------------------------------------------------------- network
 
-def get(url: str, binary: bool = False, timeout: int = 60):
+def get(url: str, binary: bool = False, timeout: int = 60, tries: int = 3):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = r.read()
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 503) or attempt == tries - 1:
+                raise
+            try:  # rate limited: wait as asked (capped), then retry
+                wait = min(int(e.headers.get("Retry-After", "")), 60)
+            except ValueError:
+                wait = 5 * (attempt + 1)
+            time.sleep(wait)
     return data if binary else data.decode("utf-8", "replace")
 
 
@@ -394,6 +434,262 @@ def apod_parse_page(raw: str, url: str) -> dict:
     return meta
 
 
+# ---------------------------------------------------------------- art (Wikidata + Commons)
+
+def norm(s: str) -> str:
+    """Lowercase, no accents, words only: for comparing names and titles."""
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+def wd_api(**params) -> dict:
+    params["format"] = "json"
+    data = json.loads(get(f"{WD_API}?{urllib.parse.urlencode(params)}"))
+    time.sleep(0.2)  # be gentle with the Wikidata API
+    return data
+
+
+def wd_entities(ids, props: str, languages: str | None = None) -> dict:
+    """wbgetentities in batches of 50. With a single language, labels fall back
+    to other languages (e.g. to English) when there is none in that one."""
+    out: dict = {}
+    ids = list(dict.fromkeys(ids))
+    for i in range(0, len(ids), 50):
+        p = {"action": "wbgetentities", "ids": "|".join(ids[i:i + 50]), "props": props}
+        if languages:
+            p["languages"] = languages
+            if "|" not in languages:
+                p["languagefallback"] = 1
+        out.update(wd_api(**p).get("entities", {}))
+    return out
+
+
+def wd_statements(ent: dict, prop: str, current: bool = False) -> list[dict]:
+    """Statements of a property, preferred rank first, never deprecated ones.
+    current=True also drops the ones with an end time (e.g. a former collection)."""
+    st = [c for c in ent.get("claims", {}).get(prop, [])
+          if c.get("rank") != "deprecated" and "datavalue" in c.get("mainsnak", {})
+          and not (current and "P582" in c.get("qualifiers", {}))]
+    return sorted(st, key=lambda c: c.get("rank") != "preferred")
+
+
+def wd_values(ent: dict, prop: str, current: bool = False) -> list:
+    return [c["mainsnak"]["datavalue"]["value"] for c in wd_statements(ent, prop, current)]
+
+
+def wd_ids(ent: dict, prop: str, current: bool = False) -> list[str]:
+    return [v["id"] for v in wd_values(ent, prop, current) if isinstance(v, dict) and "id" in v]
+
+
+def wd_label(ent: dict | None, lang: str) -> str:
+    labels = (ent or {}).get("labels", {})
+    for code in (lang, "en", "mul"):
+        if labels.get(code, {}).get("value"):
+            return labels[code]["value"]
+    return ""
+
+
+def wd_year(ent: dict) -> str:
+    """Year of creation (P571). 'c. 1665' when it's approximate."""
+    for st in wd_statements(ent, "P571"):
+        v = st["mainsnak"]["datavalue"]["value"]
+        m = re.match(r"([+-])0*(\d+)-", v.get("time", ""))
+        if not m:
+            continue
+        year = int(m.group(2)) * (-1 if m.group(1) == "-" else 1)
+        circa = any(q.get("datavalue", {}).get("value", {}).get("id") == "Q5727902"
+                    for q in st.get("qualifiers", {}).get("P1480", []))
+        prec = v.get("precision", 9)
+        if prec >= 9:
+            return f"c. {year}" if circa else str(year)
+        if prec == 8:  # decade
+            return f"c. {year}"
+        return ""
+    return ""
+
+
+def wd_art_classes(classes: set[str], cache: dict) -> set[str]:
+    """Which of these classes are a painting or a print (or a subclass of one).
+    One SPARQL query for the unknown ones; answers are kept in the state."""
+    todo = sorted(c for c in classes if c not in cache)
+    if todo:
+        q = ("SELECT DISTINCT ?c WHERE { VALUES ?c { " + " ".join(f"wd:{c}" for c in todo)
+             + " } VALUES ?r { " + " ".join(f"wd:{r}" for r in ART_CLASSES)
+             + " } ?c wdt:P279* ?r }")
+        res = json.loads(get(f"{WD_SPARQL}?" + urllib.parse.urlencode({"query": q, "format": "json"})))
+        ok = {b["c"]["value"].rsplit("/", 1)[1] for b in res["results"]["bindings"]}
+        for c in todo:
+            cache[c] = c in ok
+    return {c for c in classes if cache.get(c)}
+
+
+def artist_matches(want: str, ent: dict) -> bool:
+    """True if every word of the artist written in the list appears in one of
+    the creator's labels or aliases ('Van Gogh' matches 'Vincent van Gogh').
+    Names much longer than the one asked for don't count: aliases carry
+    provenance noise like 'G. Flinck wie Rembrandt'."""
+    words = norm(want).split()
+    names = [v["value"] for v in ent.get("labels", {}).values()]
+    names += [a["value"] for al in ent.get("aliases", {}).values() for a in al]
+    for n in names:
+        toks = norm(n).split()
+        if words and len(toks) <= len(words) + 2 and all(w in toks for w in words):
+            return True
+    return False
+
+
+def art_read_list(path: Path) -> list[tuple[str, str, str | None]]:
+    """'Title | Artist' per line, optionally '| Q123' to pin a Wikidata item."""
+    out = []
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        line = re.sub(r"(^|\s)#.*$", "", line).strip()  # comments: '# ...'
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            print(f"! {path.name}:{n}: expected 'Title | Artist', got {line!r}", file=sys.stderr)
+            continue
+        pin = parts[2] if len(parts) > 2 and re.fullmatch(r"Q\d+", parts[2]) else None
+        out.append((parts[0], parts[1], pin))
+    return out
+
+
+def art_resolve(title: str, artist: str, pin: str | None,
+                class_cache: dict) -> tuple[dict | None, str]:
+    """Finds the painting on Wikidata. Returns (lock entry, how) or (None, why not).
+    Never guesses: if several items fit and none clearly dominates, gives up."""
+    searches = [pin] if pin else ["label", "fulltext"]
+    why = "no Wikidata item found"
+    for how in searches:
+        if how == "label":
+            ids = [s["id"] for s in wd_api(action="wbsearchentities", search=title, language="en",
+                                           type="item", limit=20).get("search", [])]
+        elif how == "fulltext":
+            ids = [s["title"] for s in wd_api(action="query", list="search", srsearch=title,
+                                              srnamespace=0, srlimit=20)["query"]["search"]]
+        else:
+            ids = [how]
+        if not ids:
+            continue
+        ents = {k: e for k, e in wd_entities(ids, "claims|labels|sitelinks", "en").items()
+                if "missing" not in e}
+        creators = wd_entities({c for e in ents.values() for c in wd_ids(e, "P170")},
+                               "labels|aliases", ART_LANGS)
+        good = wd_art_classes({c for e in ents.values() for c in wd_ids(e, "P31")}, class_cache)
+
+        found = []
+        for q, e in ents.items():
+            if not set(wd_ids(e, "P31")) & good:
+                why = f"{q} is not a painting" if pin else why
+                continue
+            if not any(artist_matches(artist, creators.get(c, {})) for c in wd_ids(e, "P170")):
+                why = f"{q} is not by {artist}" if pin else why
+                continue
+            images = wd_values(e, "P18")
+            if not images:
+                why = f"{q} has no image on Commons"
+                continue
+            found.append((q, e, images[0], len(e.get("sitelinks", {}))))
+        if not found:
+            continue
+        if len(found) > 1:  # prefer the ones whose English label is exactly the title
+            exact = [f for f in found if norm(wd_label(f[1], "en")) == norm(title)]
+            found = exact or found
+        found.sort(key=lambda f: -f[3])
+        if len(found) > 1 and found[0][3] < ART_DOMINANCE * max(found[1][3], 1):
+            return None, "ambiguous: " + ", ".join(
+                f"{q} ({wd_label(e, 'en')!r}, {n} sitelinks)" for q, e, _, n in found[:5])
+        q, e, image, _ = found[0]
+        return {"qid": q, "image": image}, ("pinned" if pin else
+                                            "picked the clearly best-known match" if len(found) > 1
+                                            else "")
+    return None, why
+
+
+def art_update_lock(list_path: Path, class_cache: dict) -> dict:
+    """Resolves the list lines that aren't in the lock yet and saves the lock.
+    The lock (QID + Commons file) is meant to be committed: it never changes
+    unless the list does."""
+    lock_path = list_path.with_name(list_path.stem + ".lock.json")
+    lock = json.loads(lock_path.read_text()) if lock_path.exists() else {}
+    wanted = art_read_list(list_path)
+    keys = {f"{t} | {a}" for t, a, _ in wanted}
+    new = {k: v for k, v in lock.items() if k in keys}  # lines removed from the list go away
+    unresolved = []
+    for title, artist, pin in wanted:
+        key = f"{title} | {artist}"
+        if key in new and (not pin or new[key]["qid"] == pin):
+            continue
+        try:
+            entry, how = art_resolve(title, artist, pin, class_cache)
+        except Exception as e:  # noqa: BLE001
+            entry, how = None, f"Wikidata error ({e})"
+        if entry:
+            new[key] = entry
+            print(f"= art: {key} → {entry['qid']} ({entry['image']})" + (f" [{how}]" if how else ""))
+        else:
+            unresolved.append(f"{key}: {how}")
+    if new != lock:
+        tmp = lock_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dict(sorted(new.items())), ensure_ascii=False, indent=1) + "\n")
+        tmp.replace(lock_path)
+    for u in unresolved:
+        print(f"! art: skipped {u}", file=sys.stderr)
+    return new
+
+
+def art_items(list_path: Path, lang: str, width: int, items: dict, state: dict,
+              raw_dir: Path, lib_dir: Path) -> list[tuple[str, callable]]:
+    """Paintings from the list. Metadata (title, artist, year, museum) comes from
+    Wikidata in the configured language and is cached in the state; it is only
+    fetched again for new paintings or when the language changes."""
+    if not list_path.exists():
+        print(f"! art: {list_path} not found", file=sys.stderr)
+        return []
+    lock = art_update_lock(list_path, state.setdefault("wd_classes", {}))
+    by_key = {f"art:{v['qid']}": v for v in lock.values()}
+
+    for k in [k for k, v in items.items() if v.get("source") == "art" and k not in by_key]:
+        v = items.pop(k)  # taken off the list: out of the library too (the original stays)
+        (lib_dir / v["file"]).unlink(missing_ok=True)
+
+    stale = [k for k, v in by_key.items()
+             if k not in items or items[k].get("lang") != lang or items[k].get("image") != v["image"]]
+    if stale:
+        try:
+            ents = wd_entities([by_key[k]["qid"] for k in stale], "claims|labels", lang)
+            refs = {c for e in ents.values() for p in ("P170", "P195", "P276")
+                    for c in wd_ids(e, p, current=True)}
+            names = wd_entities(refs, "labels", lang)
+        except Exception as e:  # noqa: BLE001
+            print(f"! art: could not read Wikidata ({e})", file=sys.stderr)
+            ents, names = {}, {}
+        for k in stale:
+            e, entry = ents.get(by_key[k]["qid"]), by_key[k]
+            if not e:
+                continue
+            artists = [wd_label(names.get(c), lang) for c in wd_ids(e, "P170")]
+            place = (wd_ids(e, "P195", current=True) or wd_ids(e, "P276", current=True) or [None])[0]
+            meta = {
+                "source": "art", "qid": entry["qid"], "image": entry["image"], "lang": lang,
+                "file": f"art-{entry['qid']}.jpg",
+                "title": wd_label(e, lang),
+                "artist": (" y " if lang == "es" else " and ").join(a for a in artists if a),
+                "year": wd_year(e),
+                "museum": wd_label(names.get(place), lang) if place else "",
+                "urls": [f"{COMMONS_FILE}{urllib.parse.quote(entry['image'].replace(' ', '_'))}"
+                         f"?width={width}"],
+                "rejected": None,
+            }
+            old = items.get(k)
+            if old and old.get("image") != meta["image"]:
+                (raw_dir / old["file"]).unlink(missing_ok=True)
+            if old and old.get("render_key"):
+                meta["render_key"] = None  # re-render with the new text
+            items[k] = meta
+    return [(k, lambda k=k: items[k]) for k in sorted(by_key) if k in items]
+
+
 # ---------------------------------------------------------------- text
 
 def fmt_date(iso: str | None, lang: str) -> str:
@@ -593,6 +889,47 @@ def render_caption(src, W, H, title, line2, font_path):
     return canvas.convert("RGB")
 
 
+def clamp_lines(d, lines, font, maxw, n):
+    """At most n lines; if text was cut, the last one ends in an ellipsis."""
+    if len(lines) <= n:
+        return lines
+    out = lines[:n]
+    words = out[-1].split()
+    while len(words) > 1 and d.textlength(" ".join(words) + "…", font=font) > maxw:
+        words.pop()
+    out[-1] = " ".join(words).rstrip(",;:·-–") + "…"
+    return out
+
+
+def render_art(src, W, H, title, line2, font_path):
+    """Paintings: the whole painting on top, the caption in a band below it,
+    so the text never covers the artwork (most paintings are not 16:9)."""
+    src = src.convert("RGB")
+    canvas = backdrop(src, W, H, 0.30).convert("RGBA")
+    d = ImageDraw.Draw(canvas)
+    maxw = int(W * TEXT_WIDTH)
+    f1 = load_font(font_path, int(H * 0.032))
+    f2 = load_font(font_path, int(H * 0.021))
+    tl = clamp_lines(d, wrap(d, title, f1, maxw), f1, maxw, 2) if title else []
+    ml = clamp_lines(d, wrap(d, line2, f2, maxw), f2, maxw, 2) if line2 else []
+    gap = int(H * 0.03)
+    if not (tl or ml):
+        paste_fit(canvas, src, (gap, gap, W - gap, H - gap))
+        return canvas.convert("RGB")
+
+    text_h = len(tl) * f1.size * 1.25 + (f2.size * 0.5 if tl and ml else 0) + len(ml) * f2.size * 1.35
+    pad = int(H * 0.03)
+    band_h = int(text_h + 2 * pad)
+    paste_fit(canvas, src, (gap, gap, W - gap, H - band_h))
+    bottom_shade(canvas, W, H, band_h + gap, strength=170)
+    y = H - band_h + pad
+    y = draw_centered(d, tl, f1, y, W, (255, 255, 255, 240), 1.25)
+    if tl and ml:
+        y += f2.size * 0.5
+    draw_centered(d, ml, f2, y, W, (215, 215, 215, 215), 1.35)
+    return canvas.convert("RGB")
+
+
 def render_panel(src, W, H, title, meta_line, body, font_path):
     """APOD: whole image on top, text in a centered band below it.
     The text never covers the image and the sides of the screen stay free."""
@@ -677,6 +1014,83 @@ def build_pool(items: dict, lib: Path, weight: int, recent: int, n_random: int) 
     return pool
 
 
+def art_pick_today(state: dict, available: list[str], today: str) -> str:
+    """The painting of the day: same one all day, and no repeats until the whole
+    collection has been shown. Paintings added to the list join the current round."""
+    st = state.setdefault("art", {})
+    if st.get("date") == today and st.get("today") in available:
+        return st["today"]
+    seen = [k for k in st.get("seen", []) if k in available]
+    left = sorted(set(available) - set(seen))
+    if not left:  # everything shown: new round (and not yesterday's again)
+        seen = []
+        left = sorted(set(available) - {st.get("today")}) or sorted(available)
+    pick = random.Random(f"art-{today}").choice(left)
+    st.update(date=today, today=pick, seen=seen + [pick])
+    return pick
+
+
+def build_art_pool(items: dict, lib: Path, state: dict, weight: int, n_random: int) -> dict[str, Path]:
+    """The painting of the day repeated, plus a random sample that changes daily."""
+    ok = sorted(k for k, v in items.items() if v.get("source") == "art"
+                and not v.get("rejected") and (lib / v["file"]).exists())
+    if not ok:
+        return {}
+    today = dt.date.today().isoformat()
+    best = art_pick_today(state, ok, today)
+    pool = {f"art-today-{i}.jpg": lib / items[best]["file"] for i in range(1, max(weight, 1) + 1)}
+    rest = [items[k]["file"] for k in ok if k != best]
+    for f in random.Random(f"art-{today}").sample(rest, min(n_random, len(rest))):
+        pool[f] = lib / f
+    return pool
+
+
+MODES = ("space", "art")
+
+
+def parse_schedule(spec: str) -> list[str]:
+    """Which pool to show at each hour (list of 24). Accepts:
+      space | art               always the same one
+      alternate                 even hours space, odd hours art
+      space:8-19,art:20-7       hour ranges, inclusive, may wrap past midnight"""
+    spec = spec.strip().lower()
+    if spec in MODES:
+        return [spec] * 24
+    if spec == "alternate":
+        return ["space" if h % 2 == 0 else "art" for h in range(24)]
+    hours: list[str | None] = [None] * 24
+    for part in spec.split(","):
+        m = re.fullmatch(r"\s*(\w+)\s*:\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", part)
+        if not m or m.group(1) not in MODES or int(m.group(2)) > 23 or int(m.group(3)) > 23:
+            raise ValueError(f"bad part {part!r} (expected e.g. space:8-19)")
+        h, end = int(m.group(2)), int(m.group(3))
+        while True:
+            if hours[h] is not None:
+                raise ValueError(f"hour {h} is in more than one range")
+            hours[h] = m.group(1)
+            if h == end:
+                break
+            h = (h + 1) % 24
+    missing = [h for h in range(24) if hours[h] is None]
+    if missing:
+        raise ValueError(f"hours not covered: {missing}")
+    return hours  # type: ignore[return-value]
+
+
+def show_pool(cache: Path, dest: Path, mode: str) -> tuple[str, int] | None:
+    """Mirrors the library pool for this mode into the TV folder (hardlinks:
+    instant). If that pool is empty, shows the other one rather than nothing."""
+    for m in [mode] + [x for x in MODES if x != mode]:
+        src = cache / "pools" / m
+        pool = {f.name: f for f in src.glob("*.jpg")} if src.is_dir() else {}
+        if pool:
+            if m != mode:
+                print(f"! the {mode} pool is empty, showing {m}", file=sys.stderr)
+            sync_pool(pool, dest)
+            return m, len(pool)
+    return None
+
+
 def sync_pool(pool: dict[str, Path], dest: Path) -> None:
     """Leaves exactly the pool files in dest (hardlinks when possible)."""
     for f in dest.glob("*.jpg"):
@@ -737,6 +1151,18 @@ def main() -> None:
     ap.add_argument("--apod-weight", type=int, default=int(env("POOL_APOD_WEIGHT", "8")))
     ap.add_argument("--apod-recent", type=int, default=int(env("POOL_APOD_RECENT", "6")))
     ap.add_argument("--random", type=int, default=int(env("POOL_RANDOM", "40")))
+    ap.add_argument("--schedule", default=env("SCHEDULE", "space"),
+                    help="which pool the TV shows by hour: space | art | alternate | "
+                         "space:8-19,art:20-7")
+    ap.add_argument("--art-list", default=env("ART_LIST", str(ART_LIST)),
+                    help="'Title | Artist' list; the lock file sits next to it")
+    ap.add_argument("--art-weight", type=int, default=int(env("POOL_ART_WEIGHT", "6")))
+    ap.add_argument("--art-random", type=int, default=int(env("POOL_ART_RANDOM", "30")))
+    ap.add_argument("--art-width", type=int, default=int(env("ART_FETCH_WIDTH", "1920")),
+                    help="width to download paintings at from Wikimedia Commons")
+    ap.add_argument("--pool-only", action="store_true",
+                    help="only switch the TV folder to the pool for this hour (no network); for an hourly cron")
+    ap.add_argument("--hour", type=int, help="pretend it's this hour (0-23), to test SCHEDULE")
     ap.add_argument("--prune", action="store_true", help=argparse.SUPPRESS)  # compat: the pool already cleans up
     ap.add_argument("--only", nargs="*", help="process only these keys (e.g. webb:potm2610a apod:2026-11-08)")
     ap.add_argument("--debug", metavar="ID", help="print the metadata of a Webb image ID and exit")
@@ -749,17 +1175,46 @@ def main() -> None:
         print(f"rejected: {r}" if r else "accepted")
         return
 
+    try:
+        schedule = parse_schedule(a.schedule)
+    except ValueError as e:
+        sys.exit(f"Bad SCHEDULE={a.schedule!r}: {e}")
+    hour = dt.datetime.now().hour if a.hour is None else a.hour % 24
+    modes = set(schedule)
+
     W, H = (int(x) for x in a.size.lower().split("x"))
     global TEXT_WIDTH
     TEXT_WIDTH = min(max(a.text_width, 0.3), 0.9)
     caption = a.caption not in ("0", "false", "no")
-    sources = {s.strip() for s in a.sources.split(",") if s.strip()}
+    sources = {s.strip() for s in a.sources.split(",") if s.strip()} if "space" in modes else set()
     summarize = a.apod_text == "summary" and a.translate == "claude"
 
     dest, cache = Path(a.dest), Path(a.cache)
     raw_dir, lib_dir = cache / "raw", cache / "rendered"
     for d_ in (dest, raw_dir, lib_dir):
         d_.mkdir(parents=True, exist_ok=True)
+
+    def show(log_always: bool) -> tuple[str, int] | None:
+        """Puts this hour's pool in the TV folder. Logs when what's shown changes."""
+        with open(cache / ".pool.lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)  # never mirror while the daily run rebuilds the pools
+            shown = show_pool(cache, dest, schedule[hour])
+        marker = cache / "pools" / ".showing"
+        before = marker.read_text().strip() if marker.exists() else ""
+        if shown and (log_always or before != shown[0]):
+            marker.write_text(shown[0])
+            with open(dest / ".sync.log", "a") as log:
+                log.write(f"{time.strftime('%F %T')} — showing {shown[0]} ({shown[1]} files)\n")
+        return shown
+
+    if a.pool_only:
+        shown = show(False)
+        if shown:
+            print(f"{hour:02d}h → {schedule[hour]}: showing {shown[0]} ({shown[1]} files)")
+        else:
+            print("No pools yet: run a full sync first. The TV folder was left as it was.",
+                  file=sys.stderr)
+        return
 
     state_f = cache / "state.json"
     state = json.loads(state_f.read_text()) if state_f.exists() else {}
@@ -806,6 +1261,8 @@ def main() -> None:
             if got is None:
                 got = apod_scrape_items(a.apod_days, set(items))
             todo += got
+        if "art" in modes:
+            todo += art_items(Path(a.art_list), a.lang, a.art_width, items, state, raw_dir, lib_dir)
 
     stats = {"new": 0, "rerender": 0, "skipped": 0, "failed": 0}
 
@@ -875,6 +1332,11 @@ def main() -> None:
                                  it.get("credit", "ESA/Webb")]
                         line2 = "  ·  ".join(p for p in parts if p)
                     img = render_caption(im, W, H, title, line2, a.font)
+                elif it["source"] == "art":
+                    title = it.get("title", "") if caption else ""
+                    parts = [it.get("artist", ""), it.get("year", ""), it.get("museum", "")]
+                    line2 = "  ·  ".join(p for p in parts if p) if caption else ""
+                    img = render_art(im, W, H, title, line2, a.font)
                 else:
                     if caption:
                         body = "" if a.apod_text == "none" else it.get("explanation", "")
@@ -905,17 +1367,31 @@ def main() -> None:
         print(f"+ {key}  {it.get('title', '')}")
         state_f.write_text(json.dumps(state, ensure_ascii=False, indent=1))
 
-    pool = build_pool(items, lib_dir, a.apod_weight, a.apod_recent, a.random)
-    sync_pool(pool, dest)
-    stats["pool"] = len(pool)
-
+    # Today's pools, kept in the library (hardlinks). The TV folder mirrors one of them.
+    pools = {
+        "space": build_pool(items, lib_dir, a.apod_weight, a.apod_recent, a.random)
+        if "space" in modes else {},
+        "art": build_art_pool(items, lib_dir, state, a.art_weight, a.art_random)
+        if "art" in modes else {},
+    }
     state_f.write_text(json.dumps(state, ensure_ascii=False, indent=1))
+    with open(cache / ".pool.lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        for mode, pool in pools.items():
+            (cache / "pools" / mode).mkdir(parents=True, exist_ok=True)
+            sync_pool(pool, cache / "pools" / mode)
+
     summary = (f"{stats['new']} new, {stats['rerender']} re-rendered, "
                f"{stats['skipped']} skipped, {stats['failed']} failed  |  "
-               f"today's pool: {stats.get('pool', 0)} files")
+               f"pools: " + ", ".join(f"{m} {len(p)}" for m, p in pools.items() if m in modes))
+    if "art" in modes and state.get("art", {}).get("today") in items:
+        summary += f"  |  painting of the day: {items[state['art']['today']].get('title', '')}"
     with open(dest / ".sync.log", "a") as log:
         log.write(time.strftime("%F %T") + " — " + summary + "\n")
+    shown = show(True)
     print("Done:", summary)
+    if shown:
+        print(f"{hour:02d}h → {schedule[hour]}: showing {shown[0]} ({shown[1]} files)")
 
 
 if __name__ == "__main__":
