@@ -238,7 +238,7 @@ An Android screensaver is just a `DreamService`. The next idea is a minimal Kotl
 
 ## Credits
 
-- Images: **ESA/Webb** and **ESA/Hubble** ([usage terms](https://esawebb.org/copyright/)), and **NASA APOD** (each picture has its own author and many carry their own copyright; the credit is shown in the panel). This project is meant for personal use at home: check the rights of each image before redistributing.
+- Images: **ESA/Webb** and **ESA/Hubble** ([usage terms](https://esawebb.org/copyright/)), and **NASA APOD** (each picture has its own author and many carry their own copyright; the credit is shown under each picture). This project is meant for personal use at home: check the rights of each image before redistributing.
 - Screensaver: [Aerial Views](https://github.com/theothernt/AerialViews) by Neil Turner.
 
 ## License
