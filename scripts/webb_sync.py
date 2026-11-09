@@ -82,7 +82,7 @@ except ImportError:
 Image.MAX_IMAGE_PIXELS = None  # some Webb originals are huge
 
 UA = "tv-webb-screensaver (+https://github.com/wallystart/tv-webb-screensaver)"
-RENDER_VERSION = "v6"
+RENDER_VERSION = "v8"
 
 # ================================================================ ESA/Webb
 
@@ -165,6 +165,46 @@ UNITS_ES = {
     "million": "millones", "billion": "mil millones",
 }
 
+# ESA object categories, most specific first, with how to name the object
+OBJECT_KINDS = {
+    "Quasars & Black Holes": {"es": "Agujero negro", "en": "Black hole"},
+    "Exoplanets": {"es": "Exoplaneta", "en": "Exoplanet"},
+    "Solar System": {"es": "Objeto del Sistema Solar", "en": "Solar System object"},
+    "Star Clusters": {"es": "Cúmulo estelar", "en": "Star cluster"},
+    "Nebulae": {"es": "Nebulosa", "en": "Nebula"},
+    "Stars": {"es": "Región estelar", "en": "Star field"},
+    "Galaxies": {"es": "Galaxia", "en": "Galaxy"},
+}
+GALAXY_CLUSTER = re.compile(r"^(Abell|MACS|SPT|RCS|ACO|El Gordo|SMACS|CL\s?J)", re.I)
+
+CONSTELLATIONS_ES = {
+    "Andromeda": "Andrómeda", "Antlia": "Máquina Neumática", "Apus": "Ave del Paraíso",
+    "Aquarius": "Acuario", "Aquila": "Águila", "Ara": "Altar", "Aries": "Aries",
+    "Auriga": "Auriga", "Bootes": "Boyero", "Caelum": "Cincel", "Camelopardalis": "Jirafa",
+    "Cancer": "Cáncer", "Canes Venatici": "Lebreles", "Canis Major": "Can Mayor",
+    "Canis Minor": "Can Menor", "Capricornus": "Capricornio", "Carina": "Quilla",
+    "Cassiopeia": "Casiopea", "Centaurus": "Centauro", "Cepheus": "Cefeo", "Cetus": "Ballena",
+    "Chamaeleon": "Camaleón", "Circinus": "Compás", "Columba": "Paloma",
+    "Coma Berenices": "Cabellera de Berenice", "Corona Australis": "Corona Austral",
+    "Corona Borealis": "Corona Boreal", "Corvus": "Cuervo", "Crater": "Copa", "Crux": "Cruz del Sur",
+    "Cygnus": "Cisne", "Delphinus": "Delfín", "Dorado": "Dorado", "Draco": "Dragón",
+    "Equuleus": "Caballito", "Eridanus": "Erídano", "Fornax": "Horno", "Gemini": "Géminis",
+    "Grus": "Grulla", "Hercules": "Hércules", "Horologium": "Reloj", "Hydra": "Hidra",
+    "Hydrus": "Hidra Macho", "Indus": "Indio", "Lacerta": "Lagarto", "Leo": "Leo",
+    "Leo Minor": "León Menor", "Lepus": "Liebre", "Libra": "Libra", "Lupus": "Lobo",
+    "Lynx": "Lince", "Lyra": "Lira", "Mensa": "Mesa", "Microscopium": "Microscopio",
+    "Monoceros": "Unicornio", "Musca": "Mosca", "Norma": "Escuadra", "Octans": "Octante",
+    "Ophiuchus": "Ofiuco", "Orion": "Orión", "Pavo": "Pavo", "Pegasus": "Pegaso",
+    "Perseus": "Perseo", "Phoenix": "Fénix", "Pictor": "Pintor", "Pisces": "Piscis",
+    "Piscis Austrinus": "Pez Austral", "Puppis": "Popa", "Pyxis": "Brújula", "Reticulum": "Retículo",
+    "Sagitta": "Flecha", "Sagittarius": "Sagitario", "Scorpius": "Escorpio", "Sculptor": "Escultor",
+    "Scutum": "Escudo", "Serpens": "Serpiente", "Serpens Caput": "Serpiente",
+    "Serpens Cauda": "Serpiente", "Sextans": "Sextante", "Taurus": "Tauro",
+    "Telescopium": "Telescopio", "Triangulum": "Triángulo", "Triangulum Australe": "Triángulo Austral",
+    "Tucana": "Tucán", "Ursa Major": "Osa Mayor", "Ursa Minor": "Osa Menor", "Vela": "Vela",
+    "Virgo": "Virgo", "Volans": "Pez Volador", "Vulpecula": "Zorra",
+}
+
 
 # ---------------------------------------------------------------- network
 
@@ -237,7 +277,17 @@ def webb_parse_meta(raw: str) -> dict:
     if d and d.group(2) in MONTHS_EN:
         meta["date"] = f"{d.group(3)}-{MONTHS_EN.index(d.group(2)) + 1:02d}-{int(d.group(1)):02d}"
     meta["description"] = eso_description(raw)
+    meta["categories"] = eso_categories(text)
     return meta
+
+
+def eso_categories(text: str) -> list[str]:
+    """The object categories ESA files the image under ('Nebulae', 'Galaxies'…),
+    leaving out instrument and series tags like 'NIRCam' or 'Picture of the Month'."""
+    m = re.search(r"Category:\s*(.*?)\s*(?:Coordinates|Image Formats|Colours|$)", text)
+    if not m:
+        return []
+    return [c for c in OBJECT_KINDS if re.search(rf"\b{re.escape(c)}\b", m.group(1), re.I)]
 
 
 def eso_description(raw: str) -> str:
@@ -735,6 +785,90 @@ def fmt_distance(s: str | None, lang: str) -> str:
             unit = re.sub(rf"\b{en}\b", es, unit)
         unit = re.sub(r"^((?:mil )?millones) (años?)", r"\1 de \2", unit)
     return f"{num} {unit}".strip()
+
+
+def fmt_constellation(s: str | None, lang: str) -> str:
+    if not s:
+        return ""
+    return CONSTELLATIONS_ES.get(s.strip(), s) if lang == "es" else s
+
+
+def parse_ly(s: str | None) -> float | None:
+    """'161000 light years', '56 million light years' → light years."""
+    m = re.match(r"\s*([\d.,\s]+?)\s*(million|billion)?\s*light", s or "", re.I)
+    if not m:
+        return None
+    try:
+        n = float(re.sub(r"[,\s]", "", m.group(1)))
+    except ValueError:
+        return None
+    return n * {"million": 1e6, "billion": 1e9}.get((m.group(2) or "").lower(), 1)
+
+
+def fmt_years(n: float, lang: str) -> str:
+    """6500 → '6.500 años'; 5.6e7 → '56 millones de años'; 4e9 → '4.000 millones de años'."""
+    def num(x: float) -> str:
+        t = f"{x:,.0f}" if x >= 10 or x == int(x) else f"{x:,.1f}"
+        return t.translate(str.maketrans(",.", ".,")) if lang == "es" else t
+    if n >= 1e6:
+        return f"{num(n / 1e6)} millones de años" if lang == "es" else (
+            f"{num(n / 1e9)} billion years" if n >= 1e9 else f"{num(n / 1e6)} million years")
+    n = round(n, -2) if n >= 1000 else n
+    return f"{num(n)} años" if lang == "es" else f"{num(n)} years"
+
+
+def eso_facts(it: dict, lang: str) -> str:
+    """A description built only from ESA's structured data, no AI needed:
+    what the object is, where it is, and how long its light took to get here.
+    e.g. 'Nebulosa M16, dentro de la Vía Láctea. La luz que vemos salió de ahí
+    hace unos 6.500 años.'"""
+    lang = lang if lang in ("es", "en") else "en"
+    names = [n.strip() for n in (it.get("name") or "").split(",") if n.strip()]
+    catalog = [n for n in names if re.match(
+        r"(NGC|IC|M ?\d+|Messier|HH|LDN|Arp|Abell|MACS|SMACS|LMC|SMC|Sh ?2|WR|SPT|RCS)\b", n)]
+    name = (catalog or names or [""])[0]
+    kinds = it.get("categories") or []
+    kind = OBJECT_KINDS[kinds[0]][lang] if kinds else ""
+    if kind and kinds[0] == "Galaxies":
+        if GALAXY_CLUSTER.match(name):
+            kind = "Cúmulo de galaxias" if lang == "es" else "Galaxy cluster"
+        elif name.startswith("Arp"):
+            kind = "Galaxias en interacción" if lang == "es" else "Interacting galaxies"
+
+    dist, cons = parse_ly(it.get("distance")), (it.get("constellation") or "")
+    z = re.search(r"z\s*=\s*([\d.]+)", it.get("distance") or "")
+    es = lang == "es"
+    where = ""
+    if (dist and 150e3 <= dist <= 180e3 and cons in ("Dorado", "Mensa")) or name.startswith("LMC"):
+        where = ("en la Gran Nube de Magallanes, galaxia satélite de la Vía Láctea" if es
+                 else "in the Large Magellanic Cloud, a satellite galaxy of the Milky Way")
+    elif (dist and 180e3 < dist <= 220e3 and cons in ("Tucana", "Hydrus")) or name.startswith("SMC"):
+        where = ("en la Pequeña Nube de Magallanes, galaxia satélite de la Vía Láctea" if es
+                 else "in the Small Magellanic Cloud, a satellite galaxy of the Milky Way")
+    elif dist and dist < 100e3:
+        where = "dentro de la Vía Láctea" if es else "inside the Milky Way"
+    elif z and float(z.group(1)) >= 2:
+        where = "en el universo temprano" if es else "in the early Universe"
+
+    if "Magellanic" in where or "Magallanes" in where:
+        name = re.sub(r"^(LMC|SMC)\s+", "", name)  # the place is said in words
+        if kinds and kinds[0] == "Galaxies":
+            kind = ""  # an object inside that galaxy, not a galaxy of its own
+    first = " ".join(p for p in (kind, name) if p)
+    if where:
+        sep = ", " if name else " "
+        first = f"{first}{sep}{where}" if first else where[0].upper() + where[1:]
+    out = f"{first}." if first else ""
+    if dist and dist >= 100:
+        out += (f" La luz que vemos salió de ahí hace unos {fmt_years(dist, lang)}." if es
+                else f" The light we see left it about {fmt_years(dist, lang)} ago.")
+    return out.strip()
+
+
+def clean_title(title: str) -> str:
+    """'FS Tau (Webb NIRCam image)' → 'FS Tau': the instrument note adds nothing on a TV."""
+    return re.sub(r"\s*\((?:[^()]*\b(?:image|NIRCam|MIRI|NIRSpec|WFC3|ACS)\b[^()]*)\)\s*$", "",
+                  title, flags=re.I).strip() or title
 
 
 def claude(prompt: str, max_tokens: int = 400) -> str:
@@ -1343,12 +1477,15 @@ def main() -> None:
                 print(f"- {key}: {it['rejected']}")
 
         elif it.get("source") in ESO_SITES:
-            if caption and "description" not in it and not it.get("rejected"):
-                # Saved by a version that didn't keep the press text: read the page once more
+            if caption and "categories" not in it and not it.get("rejected"):
+                # Saved by a version that didn't keep the press text or the
+                # object categories: read the page once more
                 site = ESO_SITES[it["source"]]
                 img_id = it["file"][len(site["prefix"]):-len(".jpg")]
                 try:
-                    it["description"] = eso_description(get(f"https://{site['domain']}/images/{img_id}/"))
+                    page = get(f"https://{site['domain']}/images/{img_id}/")
+                    it["description"] = eso_description(page)
+                    it["categories"] = eso_categories(page_text(page))
                     time.sleep(0.5)
                 except Exception as e:  # noqa: BLE001
                     print(f"! {key}: could not read its description ({e})", file=sys.stderr)
@@ -1396,12 +1533,18 @@ def main() -> None:
                     line2 = ""
                     desc = ""
                     if caption:
-                        title, _ = localize(it.get("title", ""), "", a.lang, a.translate,
-                                            False, tcache)
+                        title, _ = localize(clean_title(it.get("title", "")), "", a.lang,
+                                            a.translate, False, tcache)
+                        # Claude's note when available; otherwise one built from ESA's data
                         desc = describe(it.get("title", ""), it.get("description", ""),
                                         a.lang, a.translate, tcache)
-                        parts = [fmt_date(it.get("date"), a.lang), it.get("constellation", ""),
-                                 fmt_distance(it.get("distance"), a.lang),
+                        facts = "" if desc else eso_facts(it, a.lang)
+                        desc = desc or facts
+                        # the facts already tell how far it is ("its light left it… ago")
+                        said = facts and (parse_ly(it.get("distance")) or 0) >= 100
+                        parts = [fmt_date(it.get("date"), a.lang),
+                                 fmt_constellation(it.get("constellation"), a.lang),
+                                 "" if said else fmt_distance(it.get("distance"), a.lang),
                                  it.get("credit", "ESA/Webb")]
                         line2 = "  ·  ".join(p for p in parts if p)
                     img = render_caption(im, W, H, title, line2, a.font, desc)
