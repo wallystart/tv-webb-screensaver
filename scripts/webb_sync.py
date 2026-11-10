@@ -37,7 +37,7 @@ Configuration (environment variables or flags, see --help):
   WEBB_LANG      en | es                                (en)
   WEBB_SIZE      TV resolution                          (1920x1080)
   WEBB_CAPTION   1 = with text, 0 = image only          (1)
-  WEBB_TRANSLATE none | claude | argos                  (none)
+  WEBB_TRANSLATE none | claude | ollama | argos         (none)
   WEBB_FONT      path to a .ttf                         (DejaVu Sans)
   WEBB_TEXT_WIDTH share of the width for text, centered  (0.60)
   APOD_API_KEY   api.nasa.gov key                       (DEMO_KEY)
@@ -52,6 +52,9 @@ Configuration (environment variables or flags, see --help):
   POOL_ART_RANDOM   random paintings                    (30)
   ART_FETCH_WIDTH   download width from Commons         (1920)
   ANTHROPIC_API_KEY / CLAUDE_MODEL   for WEBB_TRANSLATE=claude
+  OLLAMA_URL / OLLAMA_MODEL          for WEBB_TRANSLATE=ollama (local model)
+  LLM_MAX_CALLS     model requests per run              (20 with ollama)
+  OLLAMA_BUSY_UNITS systemd units; while one is active, don't use Ollama
 """
 from __future__ import annotations
 
@@ -65,6 +68,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import re
 import sys
 import time
@@ -886,11 +890,54 @@ def claude(prompt: str, max_tokens: int = 400) -> str:
         return json.load(r)["content"][0]["text"].strip()
 
 
+def ollama(prompt: str, max_tokens: int = 400) -> str:
+    """A local model through Ollama (OLLAMA_URL, OLLAMA_MODEL). Slow on CPU, free."""
+    body = json.dumps({
+        "model": os.environ.get("OLLAMA_MODEL", "llama3.1:8b"),
+        "prompt": prompt, "stream": False, "think": False,
+        "options": {"num_predict": max_tokens, "temperature": 0.3},
+    }).encode()
+    url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/") + "/api/generate"
+    req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=900) as r:
+        out = json.load(r).get("response", "")
+    return re.sub(r"(?s)<think>.*?</think>", "", out).strip()
+
+
+LLMS = {"claude": claude, "ollama": ollama}
 LANG_NAME = {"es": "neutral Latin American Spanish", "en": "English"}
 
-# Translation health for this run. After an auth error (bad API key) we stop
-# trying; images rendered with an untranslated text are re-rendered next run.
-TRANSLATE = {"disabled": False, "failed": False}
+# Translation health for this run. After an auth error, an unreachable server
+# or the per-run budget (LLM_MAX_CALLS) we stop asking; images rendered with an
+# untranslated text are re-rendered on a later run that can translate them.
+TRANSLATE = {"disabled": False, "failed": False, "calls": 0, "max": None}
+
+
+def llm(how: str, prompt: str, max_tokens: int) -> str | None:
+    """Asks the configured model. None = not asked (disabled or over budget)."""
+    if TRANSLATE["disabled"]:
+        TRANSLATE["failed"] = True
+        return None
+    if TRANSLATE["max"] is not None and TRANSLATE["calls"] >= TRANSLATE["max"]:
+        TRANSLATE["disabled"] = TRANSLATE["failed"] = True
+        print(f"! {how}: reached LLM_MAX_CALLS={TRANSLATE['max']} for this run; "
+              "the remaining texts are done on later runs.", file=sys.stderr)
+        return None
+    TRANSLATE["calls"] += 1
+    return LLMS[how](prompt, max_tokens=max_tokens)
+
+
+def llm_failed(how: str, what: str, e: Exception) -> None:
+    TRANSLATE["failed"] = True
+    fatal = (isinstance(e, urllib.error.HTTPError) and e.code in (401, 403)) or (
+        isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError))
+    if fatal:  # bad key or server down: no point in asking again this run
+        TRANSLATE["disabled"] = True
+        hint = "check ANTHROPIC_API_KEY" if how == "claude" else "check that Ollama is running"
+        print(f"! {what} disabled for this run ({how}): {e} — {hint}. Texts stay untranslated "
+              "and are retried on a later run.", file=sys.stderr)
+    else:
+        print(f"! {what} failed ({how}): {e}", file=sys.stderr)
 
 
 def localize(title: str, body: str, lang: str, how: str, summarize: bool,
@@ -902,11 +949,8 @@ def localize(title: str, body: str, lang: str, how: str, summarize: bool,
     key = hashlib.sha1(f"{how}|{lang}|{summarize}|{title}|{body}".encode()).hexdigest()
     if key in cache:
         return tuple(cache[key])
-    if TRANSLATE["disabled"]:
-        TRANSLATE["failed"] = True
-        return title, body
     try:
-        if how == "claude":
+        if how in LLMS:
             if lang == "en":
                 task = "Summarize, in English,"
             else:
@@ -915,11 +959,14 @@ def localize(title: str, body: str, lang: str, how: str, summarize: bool,
             extra = (" Summarized text: 50 to 80 words, 2 or 3 sentences, faithful to the "
                      "original, understandable without seeing the image next to it; no links "
                      "or 'click here' style references.") if summarize else ""
-            raw = claude(
+            raw = llm(
+                how,
                 f"{task} the title and text of this astronomy image, to be shown on a "
                 f"TV.{extra} Reply ONLY with JSON "
                 f'{{"title": "...", "text": "..."}}.\n\nTITLE: {title}\n\nTEXT: {body}',
                 max_tokens=600)
+            if raw is None:
+                return title, body
             data = json.loads(re.search(r"\{.*\}", raw, re.S).group(0))
             out = (data.get("title") or title, data.get("text") or body)
         elif how == "argos":
@@ -930,13 +977,7 @@ def localize(title: str, body: str, lang: str, how: str, summarize: bool,
         else:
             return title, body
     except Exception as e:  # noqa: BLE001
-        TRANSLATE["failed"] = True
-        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
-            TRANSLATE["disabled"] = True
-            print(f"! translation disabled for this run ({how}): {e} — check ANTHROPIC_API_KEY. "
-                  "Texts stay untranslated and will be retried on the next run.", file=sys.stderr)
-        else:
-            print(f"! translation failed ({how}): {e}", file=sys.stderr)
+        llm_failed(how, "translation", e)
         return title, body
     cache[key] = list(out)
     return out
@@ -944,26 +985,24 @@ def localize(title: str, body: str, lang: str, how: str, summarize: bool,
 
 def describe(title: str, text: str, lang: str, how: str, cache: dict) -> str:
     """One or two short sentences for a Webb/Hubble caption: what the telescope
-    is looking at and why it's interesting. Needs WEBB_TRANSLATE=claude; without
-    it, English gets the first sentence of the press text and other languages
-    get nothing (better no text than text in the wrong language)."""
+    is looking at and why it's interesting. Needs WEBB_TRANSLATE=claude or
+    ollama; without it, English gets the first sentence of the press text and
+    other languages get "" (the caller then builds one from ESA's data)."""
     if not text:
         return ""
-    if how != "claude":
+    if how not in LLMS:
         if lang != "en":
             return ""
         for s in re.split(r"(?<=[.!?])\s+", text)[:4]:  # skip "In this Picture of the Week…"
             if len(s) <= 200 and not re.search(r"Picture of the (Week|Month)|Telescope", s):
                 return s
         return ""
-    key = hashlib.sha1(f"desc|{lang}|{title}|{text}".encode()).hexdigest()
+    key = hashlib.sha1(f"desc|{how}|{lang}|{title}|{text}".encode()).hexdigest()
     if key in cache:
         return cache[key]
-    if TRANSLATE["disabled"]:
-        TRANSLATE["failed"] = True
-        return ""
     try:
-        out = claude(
+        out = llm(
+            how,
             f"Below is the press text of a space telescope image titled {title!r}. Write a "
             f"caption for a TV screensaver, in {LANG_NAME[lang]}: one or two short sentences, "
             "at most 28 words in total. Say what the telescope is pointed at and what makes "
@@ -971,12 +1010,11 @@ def describe(title: str, text: str, lang: str, how: str, cache: dict) -> str:
             "Be concrete and plain; no hype, don't start with 'This image' or repeat the "
             "title, and leave out the distance and constellation (already shown). "
             f"Reply with the caption only.\n\nTEXT: {text}", max_tokens=200)
+        if out is None:
+            return ""
         out = re.sub(r"\s+", " ", out).strip().strip('"«»')
     except Exception as e:  # noqa: BLE001
-        TRANSLATE["failed"] = True
-        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
-            TRANSLATE["disabled"] = True
-        print(f"! description failed: {e}", file=sys.stderr)
+        llm_failed(how, "description", e)
         return ""
     cache[key] = out
     return out
@@ -1335,7 +1373,7 @@ def main() -> None:
     ap.add_argument("--size", default=env("WEBB_SIZE", "1920x1080"))
     ap.add_argument("--caption", default=env("WEBB_CAPTION", "1"))
     ap.add_argument("--translate", default=env("WEBB_TRANSLATE", "none"),
-                    choices=["none", "claude", "argos"])
+                    choices=["none", "claude", "ollama", "argos"])
     ap.add_argument("--font", default=env("WEBB_FONT"))
     ap.add_argument("--text-width", type=float, default=float(env("WEBB_TEXT_WIDTH", "0.60")),
                     help="share of the screen width used by text, centered (0.3-0.9)")
@@ -1382,7 +1420,9 @@ def main() -> None:
     TEXT_WIDTH = min(max(a.text_width, 0.3), 0.9)
     caption = a.caption not in ("0", "false", "no")
     sources = {s.strip() for s in a.sources.split(",") if s.strip()} if "space" in modes else set()
-    summarize = a.apod_text == "summary" and a.translate == "claude"
+    summarize = a.apod_text == "summary" and a.translate in LLMS
+    max_calls = env("LLM_MAX_CALLS", "20" if a.translate == "ollama" else "")
+    TRANSLATE["max"] = int(max_calls) if max_calls.strip() else None
 
     dest, cache = Path(a.dest), Path(a.cache)
     raw_dir, lib_dir = cache / "raw", cache / "rendered"
@@ -1441,21 +1481,33 @@ def main() -> None:
         .encode()).hexdigest()[:10]
     # Rendered while translation was failing: kept until the API key changes,
     # then re-rendered (and translated). Avoids re-rendering daily for nothing.
-    untranslated_key = "untranslated-" + hashlib.sha1(
-        f"{render_key}|{os.environ.get('ANTHROPIC_API_KEY', '')}".encode()).hexdigest()[:10]
+    untranslated_key = f"untranslated-{render_key}"
+    if a.translate == "ollama":  # a local model shared with other work: step aside
+        busy = [u for u in env("OLLAMA_BUSY_UNITS", "").split(",") if u.strip() and subprocess.run(
+            ["systemctl", "is-active", "--quiet", u.strip()]).returncode == 0]
+        if busy:
+            TRANSLATE["disabled"] = True
+            print(f"! ollama: {', '.join(busy)} is running; no translations this run.",
+                  file=sys.stderr)
 
     todo: list[tuple[str, callable | None]] = []
     if a.only:
         todo = [(k, None) for k in a.only]
     else:
-        for name in ESO_SITES:
-            if name in sources:
-                todo += eso_items(name)
-        if "apod" in sources:
+        if "apod" in sources:  # first: today's APOD gets the translation budget first
             got = apod_items(a.apod_key, a.apod_days)
             if got is None:
                 got = apod_scrape_items(a.apod_days, set(items))
-            todo += got
+            # The scraper only returns new days: add the APODs already in the
+            # library too, so they get re-rendered (language, translation…)
+            fresh = {k for k, _ in got}
+            oldest = (dt.date.today() - dt.timedelta(days=a.apod_days)).isoformat()
+            got += [(k, lambda k=k: items[k]) for k, v in items.items()
+                    if v.get("source") == "apod" and k not in fresh and v.get("date", "") >= oldest]
+            todo += sorted(got, key=lambda kv: kv[0], reverse=True)
+        for name in ESO_SITES:
+            if name in sources:
+                todo += eso_items(name)
         if "art" in modes:
             todo += art_items(Path(a.art_list), a.lang, a.art_width, items, state, raw_dir, lib_dir)
 
@@ -1515,7 +1567,9 @@ def main() -> None:
             time.sleep(1)
 
         out = lib_dir / it["file"]
-        if it.get("render_key") in (render_key, untranslated_key) and out.exists():
+        done = it.get("render_key") == render_key or (
+            it.get("render_key") == untranslated_key and TRANSLATE["disabled"])
+        if done and out.exists():  # untranslated ones are retried while translation works
             continue
 
         TRANSLATE["failed"] = False
