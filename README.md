@@ -6,12 +6,14 @@ Instead of the same old photographer shots (Google's *Backdrop*), the TV shows:
 
 - **NASA APOD**: today's picture comes up **often**, with its explanation (optionally translated and summarized) in a band below the image that never covers it.
 - **ESA/Webb** (*Picture of the Month*) and **ESA/Hubble** (*Picture of the Week*), plus nebulae, galaxies and stars: a **random selection that changes every day**, each with a one-or-two-line note on what the telescope is looking at and why it's interesting.
-- **Optional art mode:** famous public-domain paintings (Van Gogh, Vermeer, Hokusai, Velázquez…), with a **painting of the day**. The TV can alternate between space and art by the hour.
+- **Optional art mode:** famous public-domain paintings (Van Gogh, Vermeer, Hokusai, Velázquez…), with a **painting of the day**.
+- **Optional animals mode:** Wikimedia Commons *featured pictures* of animals, named in your language, with an **animal of the day**.
+- The TV can **take turns** between space, art and animals (e.g. 20 minutes each), or follow hour ranges.
 
 Also:
 
 - **No distortion:** every image is fit to the TV's exact resolution, and the borders are filled with a blurred copy of the same image.
-- **Captions:** title, date, constellation and distance (paintings: title, artist, year and museum), in English or Spanish.
+- **Captions:** title, date, constellation and distance (paintings: title, artist, year and museum; animals: name, scientific name, photographer and license), in English or Spanish.
 - **Real photos only:** charts, spectra, and versions with compasses or labels are discarded.
 
 ```
@@ -137,16 +139,30 @@ The art pool, rebuilt every day:
 | Painting of the day, **repeated** | 6 copies | `POOL_ART_WEIGHT` |
 | **Random** paintings (changes daily) | 30 | `POOL_ART_RANDOM` |
 
-**Which pool the TV shows** is set by `SCHEDULE`:
+#### Animals mode: featured wildlife photos
+
+A third pool with animal photos from **[Wikimedia Commons featured pictures](https://commons.wikimedia.org/wiki/Category:Featured_pictures_of_animals)**: about 5,000 photos chosen by community vote as the best on Commons, under free licenses (CC BY-SA, CC0, public domain), and most of them linked to their species on Wikidata.
+
+- **Which photos:** every day 12 new ones are drawn at random (`ANIMALS_PER_DAY`; 48 on the first run) and the library keeps the latest 240 (`ANIMALS_MAX`), so it keeps changing. Only landscape JPEGs at least 1920 px wide, **linked to an animal taxon on Wikidata** (no species, no photo: names are never guessed from file names). Museum specimens, skeletons and illustrations are left out, and so is anything whose taxonomy doesn't lead to the animal kingdom (a flower tagged on the photo, say).
+- **Name:** the species' common name in `WEBB_LANG` from Wikidata (*Búho real*, *Elefante africano*). Many insects and rare species have none in Spanish: then the nearest well-known group up the taxonomy names it (*Mariposa o polilla*, *Ciervo*, *Libélula*; the list is `ANIMAL_GROUPS` in the script).
+- **Caption:** the name, then `scientific name · Photo: author · license`. The CC BY-SA license requires crediting the author, so it's always shown.
+- **Animal of the day:** like the painting of the day, repeated in the pool (`POOL_ANIMAL_WEIGHT`, 6) next to a random daily sample (`POOL_ANIMAL_RANDOM`, 30).
+
+#### Which pool the TV shows
+
+`SCHEDULE` decides:
 
 | `SCHEDULE` | Meaning |
 |---|---|
-| `space` (default) | Only space, as before. Art isn't even downloaded. |
-| `art` | Only paintings. |
-| `alternate` | Even hours space, odd hours art. |
+| `space` (default) | Only space, as before. Nothing else is downloaded. |
+| `art` / `animals` | Only that pool. |
+| `space,art,animals` | **Take turns**, `SCHEDULE_MINUTES` each (default 60), counting from midnight. With 20: space at :00, art at :20, animals at :40, every hour. |
+| `alternate` | Same as `space,art`. |
 | `space:8-19,art:20-7` | Hour ranges (inclusive, may wrap past midnight). Every hour must be covered exactly once. |
 
-Both pools are kept in `~/.cache/webb/pools/{space,art}` (hardlinks). Switching is a separate, instant step with no network: `webb_sync.py --pool-only`, run hourly from cron (see below). To try a schedule without waiting: `./scripts/webb_sync.py --pool-only --schedule alternate --hour 21`.
+All pools are kept in `~/.cache/webb/pools/` (hardlinks). Switching is a separate, instant step with no network: `webb_sync.py --pool-only`, run from cron at every turn (see below). To try a schedule without waiting: `./scripts/webb_sync.py --pool-only --schedule space,art,animals --schedule-minutes 20 --time 21:45`.
+
+**Fixed file names.** The TV folder always holds `slot-01.jpg` … `slot-48.jpg` (`TV_SLOTS`), and a switch only changes which picture each name points to. Aerial Views reads the folder list once, when the screensaver starts, then loops over it and reads every file again each time it's shown (it keeps no image cache). With fixed names, a TV that is already running the screensaver picks up the new pool on the next picture, instead of stumbling on files that no longer exist.
 
 #### Configuration
 
@@ -160,30 +176,41 @@ Everything is set through environment variables, a `.env` file at the repo root,
 | `WEBB_SIZE` | TV resolution | `1920x1080` |
 | `WEBB_LANG` | `en` / `es` | `en` |
 | `WEBB_CAPTION` | `1` with text / `0` image only | `1` |
-| `WEBB_TRANSLATE` | `none` / `claude` / `argos` | `none` |
+| `WEBB_TRANSLATE` | `none` / `claude` / `ollama` / `argos` | `none` |
 | `WEBB_FONT` | path to a `.ttf` | DejaVu Sans |
 | `WEBB_TEXT_WIDTH` | share of the screen width used by text, centered | `0.60` |
+| `OLLAMA_URL` / `OLLAMA_MODEL` | local Ollama server and model, for `WEBB_TRANSLATE=ollama` | `http://127.0.0.1:11434` / `llama3.1:8b` |
+| `LLM_MAX_CALLS` | model requests per run; the rest wait for later runs | `20` with `ollama`, no limit with `claude` |
+| `OLLAMA_BUSY_UNITS` | systemd units (comma-separated); while one is active, the run doesn't use Ollama | none |
 | `APOD_API_KEY` | free key from [api.nasa.gov](https://api.nasa.gov) | `DEMO_KEY` |
 | `APOD_DAYS` | how many days of APOD to fetch per run | `14` |
 | `APOD_TEXT` | `summary` / `full` / `none` | `summary` |
-| `SCHEDULE` | `space` / `art` / `alternate` / `space:8-19,art:20-7` | `space` |
+| `SCHEDULE` | `space` / `art` / `animals` / `space,art,animals` / `alternate` / `space:8-19,art:20-7` | `space` |
 | `ART_LIST` | path to the painting list | `art/paintings.txt` |
 | `POOL_ART_WEIGHT` | copies of the painting of the day | `6` |
 | `POOL_ART_RANDOM` | random paintings in the art pool | `30` |
-| `ART_FETCH_WIDTH` | width to download paintings at, in px | `1920` |
+| `ART_FETCH_WIDTH` | width to download paintings and animal photos at, in px | `1920` |
+| `SCHEDULE_MINUTES` | minutes per turn when pools take turns | `60` |
+| `TV_SLOTS` | pictures in the TV folder (`slot-01.jpg`…) | `48` |
+| `ANIMALS_PER_DAY` | new animal photos per day | `12` |
+| `ANIMALS_MAX` | animal photos kept in the library (oldest go first) | `240` |
+| `POOL_ANIMAL_WEIGHT` | copies of the animal of the day | `6` |
+| `POOL_ANIMAL_RANDOM` | random animal photos in the pool | `30` |
+| `ANIMAL_CATEGORY` | Commons category to draw from (e.g. `Featured pictures of birds`) | `Featured pictures of animals` |
 
 `DEMO_KEY` is enough for one run a day, but getting your own key is better (free, arrives instantly by email).
 
 #### Text, language and translation
 
-- **Webb and Hubble** get a short caption **centered** at the bottom: title, a one-or-two-line **description** (what the telescope is pointed at and why it's interesting: what astronomers want to see, a finding or a curiosity), and date, constellation, distance and credit. With `WEBB_TRANSLATE=claude`, Claude writes it from ESA's press text. Without it (or if the API key fails) it's built from ESA's own data, in the chosen language: what the object is, where it is and how long its light took to reach us, e.g. *Nebulosa M16, dentro de la Vía Láctea. La luz que vemos salió de ahí hace unos 6.500 años.* (the distance then drops out of the data line, since it's already said). Constellation names are translated too (*Ursa Major* → *Osa Mayor*).
+- **Webb and Hubble** get a short caption **centered** at the bottom: title, a one-or-two-line **description** (what the telescope is pointed at and why it's interesting: what astronomers want to see, a finding or a curiosity), and date, constellation, distance and credit. With `WEBB_TRANSLATE=claude` or `ollama`, the model writes it from ESA's press text. Without it (or if the API key fails) it's built from ESA's own data, in the chosen language: what the object is, where it is and how long its light took to reach us, e.g. *Nebulosa M16, dentro de la Vía Láctea. La luz que vemos salió de ahí hace unos 6.500 años.* (the distance then drops out of the data line, since it's already said). Constellation names are translated too (*Ursa Major* → *Osa Mayor*).
 - **APOD** shows the whole image on top and a **centered band** below with title, date, credit and the explanation: the text never covers the image. The font size adjusts itself so everything fits.
 - All text stays in the **middle 60%** of the screen (`WEBB_TEXT_WIDTH`), so it doesn't collide with the clock and other overlays Aerial Views draws near the edges.
 - Dates and distances are written in the chosen language with no external dependencies. Titles and explanations come in English from the sources; to translate or condense them:
   - `WEBB_TRANSLATE=claude` + `ANTHROPIC_API_KEY=...` (optional `CLAUDE_MODEL`): translates when `WEBB_LANG=es`, and **condenses the APOD explanation to 2–3 sentences** (in any language), which is what reads comfortably from the couch. Each text is processed only once and cached; it costs cents per month. **Recommended.**
+  - `WEBB_TRANSLATE=ollama`: the same as `claude` (translation, APOD summary and the Webb/Hubble description) with a **local model** through [Ollama](https://ollama.com): free and private, but slow on a CPU. Pick the model with `OLLAMA_MODEL`. If the server also runs other work, use a model that is already loaded (so nothing gets evicted from RAM), cap the requests per run with `LLM_MAX_CALLS` (the backlog is worked off over several days; today's APOD goes first), and list in `OLLAMA_BUSY_UNITS` the systemd units during which the script must leave Ollama alone.
   - `WEBB_TRANSLATE=argos`: offline with [Argos Translate](https://github.com/argosopentech/argos-translate) (`pip install argostranslate` + the en→es package). Translates but doesn't summarize, so the APOD text stays long.
   - Without it, APOD shows the full explanation with a smaller font.
-  - If translation fails (e.g. a wrong `ANTHROPIC_API_KEY`), the run says so once and the images are shown untranslated. They're re-rendered automatically on the first run after the key changes.
+  - If translation fails (a wrong `ANTHROPIC_API_KEY`, Ollama down, the per-run cap reached), the run says so once and the images are shown untranslated (Webb/Hubble with the description built from ESA's data). They're retried on later runs, and re-rendered once their text is translated.
 
 If you change language, resolution or text settings, the script **re-renders everything from the cache** without downloading again.
 
@@ -195,13 +222,13 @@ If you change language, resolution or text settings, the script **re-renders eve
 
 #### Run it daily
 
-APOD is published once a day, so the heavy run is **daily** (8:31 AM here): it downloads, renders and rebuilds both pools. If `SCHEDULE` mixes space and art, add an **hourly** entry that only switches the TV folder (instant, no network). Keys and language live in `.env`:
+APOD is published once a day, so the heavy run is **daily** (8:31 AM here): it downloads, renders and rebuilds the pools. If `SCHEDULE` mixes pools, add an entry that only switches the TV folder (instant, no network) at every turn: `*/20` for 20-minute turns, `0` (hourly) for hour ranges. Keys and language live in `.env`:
 
 ```bash
 crontab -l 2>/dev/null | grep -v webb_sync | crontab -
 (crontab -l 2>/dev/null
  echo "31 8 * * * $PWD/scripts/webb_sync.py >/dev/null 2>&1"
- echo "0 * * * * $PWD/scripts/webb_sync.py --pool-only >/dev/null 2>&1") | crontab -
+ echo "*/20 * * * * $PWD/scripts/webb_sync.py --pool-only >/dev/null 2>&1") | crontab -
 ```
 
 The two never step on each other: they share a lock around the pool folders.
@@ -264,7 +291,9 @@ BACKDROP=<what-you-wrote-down> ./scripts/tv-screensaver.sh restore
 | Titles and APOD text stay in English with `WEBB_LANG=es` | Translation needs `WEBB_TRANSLATE=claude` and a valid `ANTHROPIC_API_KEY`. The run prints `translation disabled for this run … 401` if the key is wrong. Paintings don't need it (their Spanish names come from Wikidata). |
 | `art: skipped … ambiguous` | Several Wikidata items fit. Pick the right one (the message lists them) and pin it: `Title | Artist | Q…`. |
 | `art: skipped … no Wikidata item found` | Try the title as English Wikipedia writes it, or check the artist's spelling on Wikidata (e.g. *Brueghel*). Or pin the item. |
-| The TV keeps showing space when it should be art (or the reverse) | Check the hourly cron (`crontab -l`) and `/srv/webb/.sync.log` (it logs every switch). Aerial Views reads the folder when it starts: if the screensaver is already running when the hour changes, the new pool shows up the next time it starts. |
+| The TV doesn't switch pools | Check the `--pool-only` cron (`crontab -l`) runs at every turn, and `/srv/webb/.sync.log` (it logs every switch). |
+| After updating from a version without fixed names, the screensaver stalls or skips | Once: it still holds the old file list. Exit the screensaver and start it again. |
+| An animal shows a broad name (*Mariposa o polilla*) | That species has no common name in your language on Wikidata; you can add one there (label or *taxon common name*). |
 | Black screen in Aerial Views | SMB support is picky about paths: use a simple share, no subfolders, with user and password. |
 
 ---
@@ -275,8 +304,9 @@ BACKDROP=<what-you-wrote-down> ./scripts/tv-screensaver.sh restore
 2. **Webb and Hubble:** both run on the same ESA platform. It reads *Picture of the Month* / *Picture of the Week* and some categories (set in `ESO_SITES`), and for each new image reads the title, **Type**, date, constellation and distance. Only `Observation` images whose title doesn't suggest text on top (*annotated*, *compass*, *spectrum*, *illustration*…) are kept.
 3. Downloads the original (Webb/Hubble: `wallpaper_uhd` in 4K or `large`; APOD: `hdurl`) to `~/.cache/webb/raw`.
 4. Renders the TV version to `~/.cache/webb/rendered`: whole image without distortion, blurred background, and the centered caption or text band.
-5. **Art** (if `SCHEDULE` uses it): resolves new lines of `art/paintings.txt` on Wikidata into the lock file, reads title/artist/year/museum in `WEBB_LANG`, and downloads the painting from Wikimedia Commons.
-6. Rebuilds the daily pools in `~/.cache/webb/pools/` and mirrors the one for the current hour into the TV folder. Files are written atomically, so the TV never sees a half-written one. `--pool-only` does just this last mirroring step.
+5. **Animals** (if `SCHEDULE` uses it): draws random featured pictures from Commons, keeps the ones linked to an animal taxon, names them from Wikidata and downloads them.
+6. **Art** (if `SCHEDULE` uses it): resolves new lines of `art/paintings.txt` on Wikidata into the lock file, reads title/artist/year/museum in `WEBB_LANG`, and downloads the painting from Wikimedia Commons.
+7. Rebuilds the daily pools in `~/.cache/webb/pools/` and mirrors the one for the current turn into the TV folder, under fixed names. Files are written atomically, so the TV never sees a half-written one. `--pool-only` does just this last mirroring step.
 
 ---
 
@@ -289,6 +319,7 @@ An Android screensaver is just a `DreamService`. The next idea is a minimal Kotl
 ## Credits
 
 - Paintings: public-domain reproductions from **[Wikimedia Commons](https://commons.wikimedia.org)**, metadata from **[Wikidata](https://www.wikidata.org)** (CC0).
+- Animals: Wikimedia Commons featured pictures by their authors, each under its own free license (shown on screen).
 - Images: **ESA/Webb** and **ESA/Hubble** ([usage terms](https://esawebb.org/copyright/)), and **NASA APOD** (each picture has its own author and many carry their own copyright; the credit is shown under each picture). This project is meant for personal use at home: check the rights of each image before redistributing.
 - Screensaver: [Aerial Views](https://github.com/theothernt/AerialViews) by Neil Turner.
 
