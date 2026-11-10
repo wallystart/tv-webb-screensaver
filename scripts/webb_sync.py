@@ -16,14 +16,19 @@ Sources:
           resolved on Wikidata (pinned in art/paintings.lock.json) and
           downloaded from Wikimedia Commons. Caption below the painting:
           title · artist · year · museum, in WEBB_LANG.
+  animals Wikimedia Commons featured pictures of animals, drawn at random
+          every day and named from Wikidata in WEBB_LANG. Caption: name ·
+          scientific name · photographer · license.
 
 Daily pools: the TV folder doesn't hold everything, but a selection rebuilt on
 every run. "space": the latest APOD repeated several times (so it shows up
 often), the APODs from previous days, and a random sample of Webb + Hubble that
-changes every day. "art": the painting of the day repeated (no repeats until
-the whole list has been shown) plus a random sample. Both pools live in the
-cache; SCHEDULE decides which one the TV folder shows at each hour, and
---pool-only switches it from an hourly cron without touching the network.
+changes every day. "art" and "animals": the one of the day repeated (no repeats
+until the whole collection has been shown) plus a random sample. The pools live
+in the cache; SCHEDULE decides which one the TV folder shows (by hour ranges or
+taking turns every SCHEDULE_MINUTES), and --pool-only switches it from cron
+without touching the network. The TV folder uses fixed names (slot-01.jpg…),
+so a TV already running the screensaver follows the switch.
 
 Every image is fit into the TV resolution WITHOUT distortion, and the empty
 borders are filled with a blurred copy of the same image. Originals are kept in
@@ -46,11 +51,17 @@ Configuration (environment variables or flags, see --help):
   POOL_APOD_WEIGHT  copies of the latest APOD           (8)
   POOL_APOD_RECENT  previous APODs, once each           (6)
   POOL_RANDOM       random Webb + Hubble images         (40)
-  SCHEDULE       space | art | alternate | space:8-19,art:20-7   (space)
+  SCHEDULE       space | art | animals | space,art,animals | alternate |
+                 space:8-19,art:20-7                    (space)
+  SCHEDULE_MINUTES  minutes per turn                    (60)
+  TV_SLOTS          pictures in the TV folder           (48)
   ART_LIST       the painting list                      (art/paintings.txt)
   POOL_ART_WEIGHT   copies of the painting of the day   (6)
   POOL_ART_RANDOM   random paintings                    (30)
   ART_FETCH_WIDTH   download width from Commons         (1920)
+  ANIMALS_PER_DAY   new animal photos per day           (12)
+  ANIMALS_MAX       animal photos kept                  (240)
+  POOL_ANIMAL_WEIGHT / POOL_ANIMAL_RANDOM               (6 / 30)
   ANTHROPIC_API_KEY / CLAUDE_MODEL   for WEBB_TRANSLATE=claude
   OLLAMA_URL / OLLAMA_MODEL          for WEBB_TRANSLATE=ollama (local model)
   LLM_MAX_CALLS     model requests per run              (20 with ollama)
@@ -157,6 +168,48 @@ ART_CLASSES = {"Q3305213": "painting", "Q11060274": "print"}
 # least this many times the Wikipedia articles (sitelinks) of the next one.
 ART_DOMINANCE = 5
 ART_LANGS = "en|es|fr|de|it|nl|pt|ja|ru|nb"  # creator names compared against the list
+
+# ================================================================ animals
+
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+# Wikimedia Commons "Featured pictures": photos voted by the community as the
+# best on Commons. ~5,000 of animals, free licenses, most linked to the species.
+ANIMAL_CATEGORY = "Featured pictures of animals"
+# File names that give away something other than a photo of a live animal
+ANIMAL_SKIP = re.compile(
+    r"(illustration|drawing|plate\b|engraving|lithograph|painting|skeleton|skull|specimen|"
+    r"taxiderm|museum|MNHN|MHNT|fossil|stamp|\bmap\b|diagram|x-ray|scan\b|\begg)", re.I)
+TAXON_RANK = {"Q7432": 0, "Q68947": 1, "Q34740": 2}  # species, subspecies, genus: most specific first
+# Plain names for well-known groups, keyed by their (stable) scientific name.
+# Used when a species has no common name in the language: the nearest group
+# up the taxonomy that is in this list names it ("Mariposa o polilla").
+ANIMAL_GROUPS = {
+    "Cervidae": ("Ciervo", "Deer"), "Bovidae": ("Bóvido", "Bovid"), "Felidae": ("Felino", "Cat"),
+    "Canidae": ("Cánido", "Canid"), "Ursidae": ("Oso", "Bear"), "Mustelidae": ("Mustélido", "Mustelid"),
+    "Equidae": ("Equino", "Equid"), "Cetacea": ("Cetáceo", "Cetacean"), "Primates": ("Primate", "Primate"),
+    "Pinnipedia": ("Lobo marino o foca", "Seal or sea lion"), "Carnivora": ("Carnívoro", "Carnivoran"),
+    "Rodentia": ("Roedor", "Rodent"), "Chiroptera": ("Murciélago", "Bat"), "Mammalia": ("Mamífero", "Mammal"),
+    "Accipitridae": ("Ave rapaz", "Bird of prey"), "Strigiformes": ("Búho o lechuza", "Owl"),
+    "Trochilidae": ("Colibrí", "Hummingbird"), "Psittaciformes": ("Loro", "Parrot"), "Aves": ("Ave", "Bird"),
+    "Serpentes": ("Serpiente", "Snake"), "Testudines": ("Tortuga", "Turtle"),
+    "Crocodylia": ("Cocodrilo", "Crocodilian"), "Iguania": ("Lagarto", "Lizard"),
+    "Gekkota": ("Geco", "Gecko"), "Reptilia": ("Reptil", "Reptile"),
+    "Anura": ("Rana o sapo", "Frog or toad"), "Caudata": ("Salamandra", "Salamander"),
+    "Amphibia": ("Anfibio", "Amphibian"), "Selachimorpha": ("Tiburón", "Shark"),
+    "Chondrichthyes": ("Pez cartilaginoso", "Cartilaginous fish"), "Actinopterygii": ("Pez", "Fish"),
+    "Teleostei": ("Pez", "Fish"), "Actinopteri": ("Pez", "Fish"), "Osteichthyes": ("Pez", "Fish"),
+    "Squamata": ("Reptil", "Reptile"),
+    "Lepidoptera": ("Mariposa o polilla", "Butterfly or moth"), "Odonata": ("Libélula", "Dragonfly"),
+    "Coleoptera": ("Escarabajo", "Beetle"), "Diptera": ("Mosca", "Fly"),
+    "Hymenoptera": ("Abeja, avispa u hormiga", "Bee, wasp or ant"),
+    "Orthoptera": ("Saltamontes o grillo", "Grasshopper or cricket"), "Mantodea": ("Mantis", "Mantis"),
+    "Hemiptera": ("Chinche o cigarra", "True bug"), "Phasmatodea": ("Insecto palo", "Stick insect"),
+    "Insecta": ("Insecto", "Insect"), "Araneae": ("Araña", "Spider"), "Scorpiones": ("Escorpión", "Scorpion"),
+    "Arachnida": ("Arácnido", "Arachnid"), "Crustacea": ("Crustáceo", "Crustacean"),
+    "Cephalopoda": ("Cefalópodo", "Cephalopod"), "Gastropoda": ("Caracol", "Snail"),
+    "Bivalvia": ("Bivalvo", "Bivalve"), "Mollusca": ("Molusco", "Mollusc"), "Scyphozoa": ("Medusa", "Jellyfish"),
+    "Anthozoa": ("Coral o anémona", "Coral or anemone"), "Echinodermata": ("Equinodermo", "Echinoderm"),
+}
 
 # ================================================================ text
 
@@ -759,6 +812,201 @@ def art_items(list_path: Path, lang: str, width: int, items: dict, state: dict,
     return [(k, lambda k=k: items[k]) for k in sorted(by_key) if k in items]
 
 
+# ---------------------------------------------------------------- animals (Commons featured pictures)
+
+def commons_api(**params) -> dict:
+    params["format"] = "json"
+    data = json.loads(get(f"{COMMONS_API}?{urllib.parse.urlencode(params)}"))
+    time.sleep(0.2)
+    return data
+
+
+def strip_html(s: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
+
+
+def taxon_names(ent: dict, lang: str) -> tuple[str, str]:
+    """(common name in lang, scientific name). The common name comes from
+    'taxon common name' (P1843) in that language, or the label if it isn't just
+    the scientific name again. Empty when there's none in that language."""
+    sci = next((v for v in wd_values(ent, "P225") if isinstance(v, str)), "")
+    label = (ent.get("labels", {}).get(lang) or {}).get("value", "")
+
+    def latin(name: str) -> bool:
+        """The scientific name, or an older synonym of it ('Tarsius syrichta'
+        for Carlito syrichta): 2-3 plain words ending in the same epithet."""
+        w = name.split()
+        return norm(name) == norm(sci) or (
+            2 <= len(w) <= 3 and bool(re.fullmatch(r"[A-Za-z ]+", name))
+            and bool(sci) and w[-1].lower() == sci.split()[-1].lower())
+
+    # The label first: Wikidata labels are usually in sentence case ("oso
+    # polar"), common names (P1843) often in Title Case ("Oso Polar").
+    names = [label] + [v["text"] for v in wd_values(ent, "P1843")
+                       if isinstance(v, dict) and v.get("language") == lang]
+    common = next((n for n in names if n and not latin(n)), "")
+    return sentence_case(common), sci
+
+
+def sentence_case(name: str) -> str:
+    """'Íbice De Los Alpes' → 'Íbice de los Alpes', 'oso polar' → 'Oso polar'.
+    Only Title Case names are lowered; a word after de/del/los/las is kept, as
+    it's usually a place or a person ('de Blyth', 'de los Alpes')."""
+    w = name.split()
+    if len(w) > 1 and all(x[:1].isupper() for x in w):
+        small = ("de", "del", "la", "las", "los", "y", "e")
+        w = [w[0]] + [x.lower() if x.lower() in small or w[i].lower() not in small else x
+                      for i, x in enumerate(w[1:])]
+    return (" ".join(w)[:1].upper() + " ".join(w)[1:]) if w else ""
+
+
+def animal_taxa_meta(taxa, lang: str) -> dict[str, tuple[str, str, bool]]:
+    """{taxon QID: (name to show, scientific name, is an animal)} in lang.
+
+    The name is the taxon's own common name if it has one (for a subspecies,
+    its species' name); if not, the nearest well-known group up the taxonomy
+    (ANIMAL_GROUPS), e.g. Papilio demoleus → 'Mariposa o polilla'. Reaching a
+    group in that list (all animals) or Animalia settles it; reaching another
+    kingdom (a plant or fungus tagged on the photo) means it's not an animal.
+    Wikidata's taxonomy is deep (birds sit ~50 levels under Animalia), so the
+    walk stops as soon as it knows."""
+    li = 0 if lang == "es" else 1
+    ents = wd_entities(list(taxa), "claims|labels", lang)
+    names: dict[str, list] = {}
+    cur: dict[str, str | None] = {}
+    for q, e in ents.items():
+        if "missing" in e:
+            continue
+        own, sci = taxon_names(e, lang)
+        names[q] = [own, sci, True if sci == "Animalia" or sci in ANIMAL_GROUPS else None]
+        if names[q][2] is None or not own:
+            cur[q] = (wd_ids(e, "P171") or [None])[0]
+    for level in range(80):
+        cur = {q: parent for q, parent in cur.items() if parent}
+        if not cur:
+            break
+        parents = wd_entities(set(cur.values()), "claims|labels", lang)
+        nxt = {}
+        for q, parent in cur.items():
+            e = parents.get(parent, {})
+            own, sci = taxon_names(e, lang)
+            if not names[q][0]:
+                if level == 0 and own and "Q68947" in wd_ids(ents[q], "P105"):
+                    names[q][0] = own  # a subspecies: its species' name
+                elif sci in ANIMAL_GROUPS:
+                    names[q][0] = ANIMAL_GROUPS[sci][li]
+            if sci == "Animalia" or sci in ANIMAL_GROUPS:
+                names[q][2] = True
+            elif "Q36732" in wd_ids(e, "P105"):  # another kingdom: a plant, a fungus…
+                names[q][2] = False
+            if names[q][2] is None or not names[q][0]:
+                nxt[q] = (wd_ids(e, "P171") or [None])[0]
+        cur = nxt
+    # Undecided after the whole walk (broken chain): not shown, rather than guessed
+    return {q: (v[0], v[1], bool(v[2])) for q, v in names.items()}
+
+def animal_candidates(category: str, lang: str, width: int, wanted: int,
+                      known: set[str]) -> list[dict]:
+    """Random featured pictures of animals that are landscape photos, big enough,
+    and linked ('depicts', P180) to an animal taxon on Wikidata. No taxon, no
+    photo: the caption is never guessed from the file name."""
+    out: list[dict] = []
+    for _ in range(4):  # a few random draws of 50 until there are enough
+        if len(out) >= wanted:
+            break
+        hits = commons_api(action="query", list="search", srnamespace=6, srlimit=50,
+                           srsort="random", srsearch=f'deepcat:"{category}" filetype:bitmap')
+        titles = [h["title"] for h in hits.get("query", {}).get("search", [])
+                  if not ANIMAL_SKIP.search(h["title"])]
+        if not titles:
+            continue
+        info = commons_api(action="query", prop="imageinfo", titles="|".join(titles),
+                           iiprop="size|mime|extmetadata",
+                           iiextmetadatafilter="LicenseShortName|Artist")["query"]["pages"]
+        pages = [p for p in info.values() if p.get("imageinfo")
+                 and f"animals:{p['pageid']}" not in known
+                 and p["imageinfo"][0].get("mime") == "image/jpeg"
+                 and p["imageinfo"][0]["width"] >= max(1920, 1.25 * p["imageinfo"][0]["height"])]
+        if not pages:
+            continue
+        media = commons_api(action="wbgetentities",
+                            ids="|".join(f"M{p['pageid']}" for p in pages)).get("entities", {})
+        depicts = {p["pageid"]: [s["mainsnak"]["datavalue"]["value"]["id"]
+                                 for s in ((media.get(f"M{p['pageid']}") or {}).get("statements")
+                                           or {}).get("P180", [])
+                                 if "datavalue" in s.get("mainsnak", {})]
+                   for p in pages}
+        ents = wd_entities({q for d in depicts.values() for q in d}, "claims|labels", lang)
+        batch = []
+        for p in pages:
+            taxa = [q for q in depicts[p["pageid"]] if "P225" in ents.get(q, {}).get("claims", {})]
+            if not taxa:
+                continue
+            taxa.sort(key=lambda q: min([TAXON_RANK.get(r, 9) for r in wd_ids(ents[q], "P105")] or [9]))
+            md = p["imageinfo"][0].get("extmetadata", {})
+            name = p["title"].split(":", 1)[1]
+            batch.append({
+                "source": "animals", "file": f"animal-{p['pageid']}.jpg", "key": f"animals:{p['pageid']}",
+                "commons": name, "taxa": taxa, "lang": lang,
+                "author": strip_html(md.get("Artist", {}).get("value", ""))[:48],
+                "license": md.get("LicenseShortName", {}).get("value", ""),
+                "urls": [f"{COMMONS_FILE}{urllib.parse.quote(name.replace(' ', '_'))}?width={width}"],
+                "added": dt.date.today().isoformat(), "rejected": None,
+            })
+        if not batch:
+            continue
+        names = animal_taxa_meta({q for m in batch for q in m["taxa"]}, lang)
+        for m in batch:  # the most specific depicted taxon that is an animal
+            animal = [q for q in m.pop("taxa") if names.get(q, ("", "", False))[2]]
+            if animal and len(out) < wanted:
+                m["taxon"] = animal[0]
+                m["title"], m["scientific"], _ = names[animal[0]]
+                out.append(m)
+                known.add(m["key"])
+    return out
+
+def animal_items(category: str, lang: str, width: int, per_day: int, keep: int, items: dict,
+                 state: dict, raw_dir: Path, lib_dir: Path) -> list[tuple[str, callable]]:
+    """The animal library: a few new featured pictures every day (more on the
+    first runs), the oldest ones dropped past `keep`. Names in WEBB_LANG."""
+    mine = {k: v for k, v in items.items() if v.get("source") == "animals"}
+    today = dt.date.today().isoformat()
+    st = state.setdefault("animals", {})
+
+    stale = [k for k, v in mine.items() if v.get("lang") != lang]
+    if stale:  # language changed: names again from Wikidata, then re-render
+        try:
+            names = animal_taxa_meta({mine[k]["taxon"] for k in stale}, lang)
+            for k in stale:
+                if mine[k]["taxon"] in names:
+                    title, sci, animal = names[mine[k]["taxon"]]
+                    mine[k].update(title=title, scientific=sci, lang=lang, render_key=None,
+                                   rejected=None if animal else "not an animal")
+        except Exception as e:  # noqa: BLE001
+            print(f"! animals: could not read Wikidata ({e})", file=sys.stderr)
+
+    wanted = per_day if len(mine) >= 48 else 48 - len(mine)  # fill up on the first run
+    if st.get("added") != today and wanted > 0:
+        try:
+            new = animal_candidates(category, lang, width, wanted, set(items))
+        except Exception as e:  # noqa: BLE001
+            print(f"! animals: could not search Commons ({e})", file=sys.stderr)
+            new = []
+        for m in new:
+            items[m.pop("key")] = m
+        if new:
+            st["added"] = today
+
+    mine = {k: v for k, v in items.items() if v.get("source") == "animals"}
+    for k in sorted(mine, key=lambda k: (mine[k].get("added", ""), k))[:max(len(mine) - keep, 0)]:
+        if k == st.get("today"):
+            continue
+        v = items.pop(k)  # the oldest go, so the library keeps changing
+        for d_ in (raw_dir, lib_dir):
+            (d_ / v["file"]).unlink(missing_ok=True)
+    return [(k, lambda k=k: items[k]) for k in sorted(items) if items[k].get("source") == "animals"]
+
+
 # ---------------------------------------------------------------- text
 
 def fmt_date(iso: str | None, lang: str) -> str:
@@ -1247,10 +1495,10 @@ def build_pool(items: dict, lib: Path, weight: int, recent: int, n_random: int) 
     return pool
 
 
-def art_pick_today(state: dict, available: list[str], today: str) -> str:
-    """The painting of the day: same one all day, and no repeats until the whole
-    collection has been shown. Paintings added to the list join the current round."""
-    st = state.setdefault("art", {})
+def pick_of_the_day(state: dict, section: str, available: list[str], today: str) -> str:
+    """The painting (or animal) of the day: same one all day, and no repeats
+    until the whole collection has been shown. New ones join the current round."""
+    st = state.setdefault(section, {})
     if st.get("date") == today and st.get("today") in available:
         return st["today"]
     seen = [k for k in st.get("seen", []) if k in available]
@@ -1258,39 +1506,47 @@ def art_pick_today(state: dict, available: list[str], today: str) -> str:
     if not left:  # everything shown: new round (and not yesterday's again)
         seen = []
         left = sorted(set(available) - {st.get("today")}) or sorted(available)
-    pick = random.Random(f"art-{today}").choice(left)
+    pick = random.Random(f"{section}-{today}").choice(left)
     st.update(date=today, today=pick, seen=seen + [pick])
     return pick
 
 
-def build_art_pool(items: dict, lib: Path, state: dict, weight: int, n_random: int) -> dict[str, Path]:
-    """The painting of the day repeated, plus a random sample that changes daily."""
-    ok = sorted(k for k, v in items.items() if v.get("source") == "art"
+def build_daily_pool(items: dict, lib: Path, state: dict, source: str,
+                     weight: int, n_random: int) -> dict[str, Path]:
+    """Art and animals: the one of the day repeated, plus a random sample that changes daily."""
+    ok = sorted(k for k, v in items.items() if v.get("source") == source
                 and not v.get("rejected") and (lib / v["file"]).exists())
     if not ok:
         return {}
     today = dt.date.today().isoformat()
-    best = art_pick_today(state, ok, today)
-    pool = {f"art-today-{i}.jpg": lib / items[best]["file"] for i in range(1, max(weight, 1) + 1)}
+    best = pick_of_the_day(state, source, ok, today)
+    pool = {f"{source}-today-{i}.jpg": lib / items[best]["file"] for i in range(1, max(weight, 1) + 1)}
     rest = [items[k]["file"] for k in ok if k != best]
-    for f in random.Random(f"art-{today}").sample(rest, min(n_random, len(rest))):
+    for f in random.Random(f"{source}-{today}").sample(rest, min(n_random, len(rest))):
         pool[f] = lib / f
     return pool
 
 
-MODES = ("space", "art")
+MODES = ("space", "art", "animals")
 
 
-def parse_schedule(spec: str) -> list[str]:
-    """Which pool to show at each hour (list of 24). Accepts:
-      space | art               always the same one
-      alternate                 even hours space, odd hours art
-      space:8-19,art:20-7       hour ranges, inclusive, may wrap past midnight"""
+def parse_schedule(spec: str, minutes: int = 60) -> list[str]:
+    """Which pool to show at each minute of the day (list of 1440). Accepts:
+      space | art | animals        always the same one
+      space,art,animals            take turns, `minutes` each, starting at midnight
+      alternate                    same as space,art
+      space:8-19,art:20-7          hour ranges, inclusive, may wrap past midnight"""
     spec = spec.strip().lower()
-    if spec in MODES:
-        return [spec] * 24
     if spec == "alternate":
-        return ["space" if h % 2 == 0 else "art" for h in range(24)]
+        spec = "space,art"
+    if ":" not in spec:
+        turns = [m.strip() for m in spec.split(",") if m.strip()]
+        bad = [m for m in turns if m not in MODES]
+        if not turns or bad:
+            raise ValueError(f"unknown pool(s) {bad or spec!r}; pools are {', '.join(MODES)}")
+        if not 1 <= minutes <= 1440:
+            raise ValueError("SCHEDULE_MINUTES must be between 1 and 1440")
+        return [turns[(i // minutes) % len(turns)] for i in range(1440)]
     hours: list[str | None] = [None] * 24
     for part in spec.split(","):
         m = re.fullmatch(r"\s*(\w+)\s*:\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", part)
@@ -1307,20 +1563,27 @@ def parse_schedule(spec: str) -> list[str]:
     missing = [h for h in range(24) if hours[h] is None]
     if missing:
         raise ValueError(f"hours not covered: {missing}")
-    return hours  # type: ignore[return-value]
+    return [hours[i // 60] for i in range(1440)]  # type: ignore[misc]
 
 
-def show_pool(cache: Path, dest: Path, mode: str) -> tuple[str, int] | None:
-    """Mirrors the library pool for this mode into the TV folder (hardlinks:
-    instant). If that pool is empty, shows the other one rather than nothing."""
+def show_pool(cache: Path, dest: Path, mode: str, slots: int) -> tuple[str, int] | None:
+    """Puts this mode's pool in the TV folder under FIXED names (slot-01.jpg…).
+
+    Aerial Views lists the folder once, when the screensaver starts, and then
+    loops over that list, reading each file again every time (no image cache).
+    With fixed names, a switch only changes what each name points to: a TV
+    that is already showing the screensaver picks the new pool up on the next
+    picture, instead of tripping over files that no longer exist.
+    If that pool is empty, shows another one rather than nothing."""
     for m in [mode] + [x for x in MODES if x != mode]:
         src = cache / "pools" / m
-        pool = {f.name: f for f in src.glob("*.jpg")} if src.is_dir() else {}
-        if pool:
+        files = sorted(src.glob("*.jpg")) if src.is_dir() else []
+        if files:
             if m != mode:
                 print(f"! the {mode} pool is empty, showing {m}", file=sys.stderr)
-            sync_pool(pool, dest)
-            return m, len(pool)
+            random.Random(f"{m}-{dt.date.today().isoformat()}").shuffle(files)
+            sync_pool({f"slot-{i + 1:02d}.jpg": files[i % len(files)] for i in range(slots)}, dest)
+            return m, len(files)
     return None
 
 
@@ -1385,8 +1648,17 @@ def main() -> None:
     ap.add_argument("--apod-recent", type=int, default=int(env("POOL_APOD_RECENT", "6")))
     ap.add_argument("--random", type=int, default=int(env("POOL_RANDOM", "40")))
     ap.add_argument("--schedule", default=env("SCHEDULE", "space"),
-                    help="which pool the TV shows by hour: space | art | alternate | "
-                         "space:8-19,art:20-7")
+                    help="which pool the TV shows when: space | art | animals | "
+                         "space,art,animals (taking turns) | alternate | space:8-19,art:20-7")
+    ap.add_argument("--schedule-minutes", type=int, default=int(env("SCHEDULE_MINUTES", "60")),
+                    help="minutes per turn when pools take turns")
+    ap.add_argument("--slots", type=int, default=int(env("TV_SLOTS", "48")),
+                    help="pictures in the TV folder (fixed names slot-01.jpg…)")
+    ap.add_argument("--animals-per-day", type=int, default=int(env("ANIMALS_PER_DAY", "12")))
+    ap.add_argument("--animals-max", type=int, default=int(env("ANIMALS_MAX", "240")),
+                    help="animal photos kept in the library; the oldest go first")
+    ap.add_argument("--animal-weight", type=int, default=int(env("POOL_ANIMAL_WEIGHT", "6")))
+    ap.add_argument("--animal-random", type=int, default=int(env("POOL_ANIMAL_RANDOM", "30")))
     ap.add_argument("--art-list", default=env("ART_LIST", str(ART_LIST)),
                     help="'Title | Artist' list; the lock file sits next to it")
     ap.add_argument("--art-weight", type=int, default=int(env("POOL_ART_WEIGHT", "6")))
@@ -1394,8 +1666,9 @@ def main() -> None:
     ap.add_argument("--art-width", type=int, default=int(env("ART_FETCH_WIDTH", "1920")),
                     help="width to download paintings at from Wikimedia Commons")
     ap.add_argument("--pool-only", action="store_true",
-                    help="only switch the TV folder to the pool for this hour (no network); for an hourly cron")
+                    help="only switch the TV folder to the pool for now (no network); for a frequent cron")
     ap.add_argument("--hour", type=int, help="pretend it's this hour (0-23), to test SCHEDULE")
+    ap.add_argument("--time", help="pretend it's this time (HH:MM), to test SCHEDULE")
     ap.add_argument("--prune", action="store_true", help=argparse.SUPPRESS)  # compat: the pool already cleans up
     ap.add_argument("--only", nargs="*", help="process only these keys (e.g. webb:potm2610a apod:2026-11-08)")
     ap.add_argument("--debug", metavar="ID", help="print the metadata of a Webb image ID and exit")
@@ -1409,11 +1682,19 @@ def main() -> None:
         return
 
     try:
-        schedule = parse_schedule(a.schedule)
+        schedule = parse_schedule(a.schedule, a.schedule_minutes)
     except ValueError as e:
         sys.exit(f"Bad SCHEDULE={a.schedule!r}: {e}")
-    hour = dt.datetime.now().hour if a.hour is None else a.hour % 24
+    now = dt.datetime.now()
+    minute = now.hour * 60 + now.minute
+    if a.hour is not None:
+        minute = (a.hour % 24) * 60
+    if a.time:
+        hh, mm = (int(x) for x in a.time.split(":"))
+        minute = (hh % 24) * 60 + mm % 60
+    clock = f"{minute // 60:02d}:{minute % 60:02d}"
     modes = set(schedule)
+    slots = max(a.slots, 1)
 
     W, H = (int(x) for x in a.size.lower().split("x"))
     global TEXT_WIDTH
@@ -1430,10 +1711,10 @@ def main() -> None:
         d_.mkdir(parents=True, exist_ok=True)
 
     def show(log_always: bool) -> tuple[str, int] | None:
-        """Puts this hour's pool in the TV folder. Logs when what's shown changes."""
+        """Puts the pool for now in the TV folder. Logs when what's shown changes."""
         with open(cache / ".pool.lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)  # never mirror while the daily run rebuilds the pools
-            shown = show_pool(cache, dest, schedule[hour])
+            shown = show_pool(cache, dest, schedule[minute], slots)
         marker = cache / "pools" / ".showing"
         before = marker.read_text().strip() if marker.exists() else ""
         if shown and (log_always or before != shown[0]):
@@ -1445,7 +1726,7 @@ def main() -> None:
     if a.pool_only:
         shown = show(False)
         if shown:
-            print(f"{hour:02d}h → {schedule[hour]}: showing {shown[0]} ({shown[1]} files)")
+            print(f"{clock} → {schedule[minute]}: showing {shown[0]} ({shown[1]} pictures)")
         else:
             print("No pools yet: run a full sync first. The TV folder was left as it was.",
                   file=sys.stderr)
@@ -1510,6 +1791,9 @@ def main() -> None:
                 todo += eso_items(name)
         if "art" in modes:
             todo += art_items(Path(a.art_list), a.lang, a.art_width, items, state, raw_dir, lib_dir)
+        if "animals" in modes:
+            todo += animal_items(env("ANIMAL_CATEGORY", ANIMAL_CATEGORY), a.lang, a.art_width,
+                                 a.animals_per_day, a.animals_max, items, state, raw_dir, lib_dir)
 
     stats = {"new": 0, "rerender": 0, "skipped": 0, "failed": 0}
 
@@ -1607,6 +1891,16 @@ def main() -> None:
                     parts = [it.get("artist", ""), it.get("year", ""), it.get("museum", "")]
                     line2 = "  ·  ".join(p for p in parts if p) if caption else ""
                     img = render_art(im, W, H, title, line2, a.font)
+                elif it["source"] == "animals":
+                    title = line2 = ""
+                    if caption:
+                        title = it.get("title") or it.get("scientific", "")
+                        photo = "Foto" if a.lang == "es" else "Photo"
+                        parts = [it.get("scientific", "") if title != it.get("scientific") else "",
+                                 f"{photo}: {it['author']}" if it.get("author") else "",
+                                 it.get("license", "")]
+                        line2 = "  ·  ".join(p for p in parts if p)
+                    img = render_caption(im, W, H, title, line2, a.font)
                 else:
                     if caption:
                         body = "" if a.apod_text == "none" else it.get("explanation", "")
@@ -1641,8 +1935,10 @@ def main() -> None:
     pools = {
         "space": build_pool(items, lib_dir, a.apod_weight, a.apod_recent, a.random)
         if "space" in modes else {},
-        "art": build_art_pool(items, lib_dir, state, a.art_weight, a.art_random)
+        "art": build_daily_pool(items, lib_dir, state, "art", a.art_weight, a.art_random)
         if "art" in modes else {},
+        "animals": build_daily_pool(items, lib_dir, state, "animals", a.animal_weight, a.animal_random)
+        if "animals" in modes else {},
     }
     state_f.write_text(json.dumps(state, ensure_ascii=False, indent=1))
     with open(cache / ".pool.lock", "w") as lk:
@@ -1656,12 +1952,14 @@ def main() -> None:
                f"pools: " + ", ".join(f"{m} {len(p)}" for m, p in pools.items() if m in modes))
     if "art" in modes and state.get("art", {}).get("today") in items:
         summary += f"  |  painting of the day: {items[state['art']['today']].get('title', '')}"
+    if "animals" in modes and state.get("animals", {}).get("today") in items:
+        summary += f"  |  animal of the day: {items[state['animals']['today']].get('title', '')}"
     with open(dest / ".sync.log", "a") as log:
         log.write(time.strftime("%F %T") + " — " + summary + "\n")
     shown = show(True)
     print("Done:", summary)
     if shown:
-        print(f"{hour:02d}h → {schedule[hour]}: showing {shown[0]} ({shown[1]} files)")
+        print(f"{clock} → {schedule[minute]}: showing {shown[0]} ({shown[1]} pictures)")
 
 
 if __name__ == "__main__":
